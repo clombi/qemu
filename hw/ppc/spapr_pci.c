@@ -1353,6 +1353,43 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
     if (sphb->pcie_ecs && pci_is_express(dev)) {
         _FDT(fdt_setprop_cell(fdt, offset, "ibm,pci-config-space-type", 0x1));
     }
+
+    /* From npu2_add_mmio_regs() - skiboot */
+    if (sphb->capi_mode) {
+	uint32_t irq;
+	Error *local_err = NULL;
+	sPAPRMachineState *spapr =
+        (sPAPRMachineState *) object_dynamic_cast(qdev_get_machine(),
+                                                  TYPE_SPAPR_MACHINE);
+
+	uint32_t reg[] = {
+		cpu_to_be32(0x00060302),
+		cpu_to_be32(0x001d0000),
+		cpu_to_be32(0x00060302),
+		cpu_to_be32(0x001d0008),
+		cpu_to_be32(0x00060302),
+		cpu_to_be32(0x001d0010),
+		cpu_to_be32(0x00060302),
+		cpu_to_be32(0x001d0018)
+	};
+
+	/* Pass the hw irq number for the translation fault irq */
+        irq = spapr_irq_findone(spapr, &local_err);
+        if (local_err) {
+                irq = 0x38;
+        } else {
+        	spapr_irq_claim(spapr, irq, false, &local_err);
+        	if (local_err) {
+			irq = 0x39;
+		}
+        }
+	_FDT(fdt_setprop_cell(fdt, offset, "ibm,opal-xsl-irq", irq));
+
+	/* Add the addresses of the registers needed by the OS to handle
+	 * faults. The OS accesses them by mmio.
+	 */
+	_FDT(fdt_setprop(fdt, offset, "ibm,opal-xsl-mmio", reg, sizeof(reg)));
+    }
 }
 
 /* create OF node for pci device and required OF DT properties */

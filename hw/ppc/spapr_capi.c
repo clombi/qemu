@@ -23,7 +23,10 @@
 #include "hw/ppc/spapr_capi.h"
 
 /* from kernel header <misc/ocxl-config.h> */
+#define OCXL_EXT_CAP_ID_PASID                 0x1B
 #define OCXL_EXT_CAP_ID_DVSEC                 0x23
+
+#define OCXL_PASID_MAX_WIDTH           	      0x4
 
 #define OCXL_DVSEC_VENDOR_OFFSET              0x4
 #define OCXL_DVSEC_ID_OFFSET                  0x8
@@ -58,22 +61,50 @@
 static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
 {
     const uint16_t cap_size = 0x100;
-    uint16_t offset = 0x100;
 
+    /* Extended Capabilities in Configuration Space always begin at offset 100h */
+    uint16_t offset = PCI_CONFIG_SPACE_SIZE;
+    uint16_t next_offset = 0x0;
+
+    /* */
     pcie_endpoint_cap_init(pdev, 0x40);
 
-    pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET,
-                 PCI_VENDOR_ID_IBM);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET,
-                 OCXL_DVSEC_TL_ID);
-    offset += cap_size;
+    /* Process Address Space ID Extended Capability */
+    next_offset = offset + PCI_EXT_CAP_PASID_SIZEOF;
+    pcie_add_capability(pdev, OCXL_EXT_CAP_ID_PASID, 0x1, offset, PCI_EXT_CAP_PASID_SIZEOF);
+    pci_set_long(pdev->config + offset, PCI_EXT_CAP(OCXL_EXT_CAP_ID_PASID, 0x1, next_offset));
+    pci_set_long(pdev->config + offset + OCXL_PASID_MAX_WIDTH, 0x00000900);
 
+    /* Designated Vendor Specific Extended Capabilities - Transport Layer */
+    offset = next_offset;
+    next_offset = offset + cap_size;
     pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET,
-                 PCI_VENDOR_ID_IBM);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET,
-                 OCXL_DVSEC_FUNC_ID);
+    pci_set_long(pdev->config + offset, PCI_EXT_CAP(OCXL_EXT_CAP_ID_DVSEC, 0x1, next_offset));
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_TL_ID);
+
+    /* Designated Vendor Specific Extended Capabilities - Function Configuration */
+    offset = next_offset;
+    next_offset = offset + cap_size;
+    pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, (0x1 << 31) | OCXL_DVSEC_FUNC_ID);
+
+    /* Designated Vendor Specific Extended Capabilities - AFU Information */
+    offset = next_offset;
+    next_offset = offset + cap_size;
+    pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_AFU_INFO_ID);
+
+    /* Designated Vendor Specific Extended Capabilities - AFU Control */
+    offset = next_offset;
+    next_offset = 0;
+    pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_AFU_CTRL_ID);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_PASID_SUP, 0x9);
+    pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ACTAG_SUP, 0x20);
 }
 
 static void spapr_capi_device_exit(PCIDevice *pdev)

@@ -103,6 +103,7 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_AFU_CTRL_ID);
+    pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ENABLE, 0x01);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_PASID_SUP, 0x9);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ACTAG_SUP, 0x20);
 }

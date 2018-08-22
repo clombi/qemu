@@ -58,16 +58,55 @@
 #define   OCXL_DVSEC_VENDOR_TLX_VERS            0x10
 #define   OCXL_DVSEC_VENDOR_DLX_VERS            0x20
 
+static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
+{
+    fprintf(stderr, "capi_mmio_read 0x%x: 0x%x\n", (unsigned) addr, (unsigned) size);
+    return 0;
+}
+
+static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
+                            unsigned width)
+{
+    fprintf(stderr, "capi_mmio_write\n");
+}
+
 static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
 {
-    const uint16_t cap_size = 0x100;
+    sPAPRCAPIDeviceState *s = SPAPR_CAPI_DEVICE(pdev);
+    uint16_t offset, next_offset, cap_size;
 
-    /* Extended Capabilities in Configuration Space always begin at offset 100h */
-    uint16_t offset = PCI_CONFIG_SPACE_SIZE;
-    uint16_t next_offset = 0x0;
+    static const MemoryRegionOps capi_mmio_ops = {
+        .read = capi_mmio_read,
+        .write = capi_mmio_write,
+        .endianness = DEVICE_BIG_ENDIAN,
+        .impl = {
+            .min_access_size = 1,
+            .max_access_size = 1,
+        }
+    };
 
-    /* */
-    pcie_endpoint_cap_init(pdev, 0x40);
+    /* Configuration Space Header */
+    pci_set_byte(pdev->config + PCI_COMMAND, PCI_COMMAND_MEMORY);
+    pci_set_word(pdev->config + PCI_STATUS, 0x1000);
+    pci_set_byte(pdev->config + PCI_REVISION_ID, 0x00);
+    pci_set_byte(pdev->config + PCI_HEADER_TYPE, 0x80);
+
+    /* mmio BAR 0 - 64MB*/
+    memory_region_init_io(&s->mmio, OBJECT(s), &capi_mmio_ops,
+                          s, "capi-mmio", 0x100000uLL);
+
+    pci_register_bar(pdev, 0,
+		     PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
+		     &s->mmio);
+
+    /* Capabilities ? */
+    /*pcie_endpoint_cap_init(pdev, 0x40);*/
+
+    /* Extended Capabilities in Configuration Space
+     * always begin at offset 100h
+     */
+    offset = PCI_CONFIG_SPACE_SIZE;
+    cap_size = 0x100;
 
     /* Process Address Space ID Extended Capability */
     next_offset = offset + PCI_EXT_CAP_PASID_SIZEOF;
@@ -104,8 +143,8 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_AFU_CTRL_ID);
     pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ENABLE, 0x01);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_PASID_SUP, 0x9);
-    pci_set_long(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ACTAG_SUP, 0x20);
+    pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_PASID_SUP, 0x9);
+    pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ACTAG_SUP, 0x20);
 }
 
 static void spapr_capi_device_exit(PCIDevice *pdev)

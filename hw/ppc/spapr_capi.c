@@ -86,7 +86,7 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     };
 
     /* Configuration Space Header */
-    pci_set_byte(pdev->config + PCI_COMMAND, PCI_COMMAND_MEMORY);
+    pci_set_word(pdev->config + PCI_COMMAND, PCI_COMMAND_MEMORY);
     pci_set_word(pdev->config + PCI_STATUS, 0x1000);
     pci_set_byte(pdev->config + PCI_REVISION_ID, 0x00);
     pci_set_byte(pdev->config + PCI_HEADER_TYPE, 0x80);

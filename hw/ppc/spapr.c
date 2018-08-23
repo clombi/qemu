@@ -75,6 +75,7 @@
 #include "qemu/cutils.h"
 #include "hw/ppc/spapr_cpu_core.h"
 #include "hw/mem/memory-device.h"
+#include "hw/ppc/spapr_capi.h"
 
 #include <libfdt.h>
 

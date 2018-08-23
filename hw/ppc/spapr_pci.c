@@ -1171,7 +1171,8 @@ static const PCIClass pci_classes[] = {
 };
 
 static const char *pci_find_device_name(uint8_t class, uint8_t subclass,
-                                        uint8_t iface)
+                                        uint8_t iface,
+                                        const char *default_name)
 {
     const PCIClass *pclass;
     const PCISubClass *psubclass;
@@ -1179,7 +1180,7 @@ static const char *pci_find_device_name(uint8_t class, uint8_t subclass,
     const char *name;
 
     if (class >= ARRAY_SIZE(pci_classes)) {
-        return "pci";
+        return default_name;
     }
 
     pclass = pci_classes + class;
@@ -1213,7 +1214,7 @@ static const char *pci_find_device_name(uint8_t class, uint8_t subclass,
     return name;
 }
 
-static gchar *pci_get_node_name(PCIDevice *dev)
+static gchar *pci_get_node_name(PCIDevice *dev, bool is_capi)
 {
     int slot = PCI_SLOT(dev->devfn);
     int func = PCI_FUNC(dev->devfn);
@@ -1221,7 +1222,8 @@ static gchar *pci_get_node_name(PCIDevice *dev)
     const char *name;
 
     name = pci_find_device_name((ccode >> 16) & 0xff, (ccode >> 8) & 0xff,
-                                ccode & 0xff);
+                                ccode & 0xff,
+                                is_capi ? "open-capi" : "pci");
 
     if (func != 0) {
         return g_strdup_printf("%s@%x,%x", name, slot, func);
@@ -1243,6 +1245,9 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
     uint32_t drc_index = spapr_phb_get_pci_drc_index(sphb, dev);
     uint32_t ccode = pci_default_read_config(dev, PCI_CLASS_PROG, 3);
     uint32_t max_msi, max_msix;
+    char *default_name;
+    uint16_t vendor_id;
+    uint16_t device_id;
 
     if (pci_default_read_config(dev, PCI_HEADER_TYPE, 1) ==
         PCI_HEADER_TYPE_BRIDGE) {
@@ -1250,23 +1255,26 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
     }
 
     /* in accordance with PAPR+ v2.7 13.6.3, Table 181 */
-    _FDT(fdt_setprop_cell(fdt, offset, "vendor-id",
-                          pci_default_read_config(dev, PCI_VENDOR_ID, 2)));
-    _FDT(fdt_setprop_cell(fdt, offset, "device-id",
-                          pci_default_read_config(dev, PCI_DEVICE_ID, 2)));
+    vendor_id = pci_default_read_config(dev, PCI_VENDOR_ID, 2);
+    _FDT(fdt_setprop_cell(fdt, offset, "vendor-id", vendor_id));
+    device_id = pci_default_read_config(dev, PCI_DEVICE_ID, 2);
+    _FDT(fdt_setprop_cell(fdt, offset, "device-id", device_id));
     _FDT(fdt_setprop_cell(fdt, offset, "revision-id",
                           pci_default_read_config(dev, PCI_REVISION_ID, 1)));
     _FDT(fdt_setprop_cell(fdt, offset, "class-code", ccode));
-    if (pci_default_read_config(dev, PCI_INTERRUPT_PIN, 1)) {
-        _FDT(fdt_setprop_cell(fdt, offset, "interrupts",
-                 pci_default_read_config(dev, PCI_INTERRUPT_PIN, 1)));
-    }
 
-    if (!is_bridge) {
-        _FDT(fdt_setprop_cell(fdt, offset, "min-grant",
-            pci_default_read_config(dev, PCI_MIN_GNT, 1)));
-        _FDT(fdt_setprop_cell(fdt, offset, "max-latency",
-            pci_default_read_config(dev, PCI_MAX_LAT, 1)));
+    if (!sphb->capi_mode) {
+        if (pci_default_read_config(dev, PCI_INTERRUPT_PIN, 1)) {
+            _FDT(fdt_setprop_cell(fdt, offset, "interrupts",
+                 pci_default_read_config(dev, PCI_INTERRUPT_PIN, 1)));
+        }
+
+        if (!is_bridge) {
+            _FDT(fdt_setprop_cell(fdt, offset, "min-grant",
+                 pci_default_read_config(dev, PCI_MIN_GNT, 1)));
+            _FDT(fdt_setprop_cell(fdt, offset, "max-latency",
+                 pci_default_read_config(dev, PCI_MAX_LAT, 1)));
+        }
     }
 
     if (pci_default_read_config(dev, PCI_SUBSYSTEM_ID, 2)) {
@@ -1279,28 +1287,37 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
                  pci_default_read_config(dev, PCI_SUBSYSTEM_VENDOR_ID, 2)));
     }
 
-    _FDT(fdt_setprop_cell(fdt, offset, "cache-line-size",
-        pci_default_read_config(dev, PCI_CACHE_LINE_SIZE, 1)));
+    if (!sphb->capi_mode) {
+        _FDT(fdt_setprop_cell(fdt, offset, "cache-line-size",
+             pci_default_read_config(dev, PCI_CACHE_LINE_SIZE, 1)));
 
-    /* the following fdt cells are masked off the pci status register */
-    pci_status = pci_default_read_config(dev, PCI_STATUS, 2);
-    _FDT(fdt_setprop_cell(fdt, offset, "devsel-speed",
-                          PCI_STATUS_DEVSEL_MASK & pci_status));
+        /* the following fdt cells are masked off the pci status register */
+        pci_status = pci_default_read_config(dev, PCI_STATUS, 2);
+        _FDT(fdt_setprop_cell(fdt, offset, "devsel-speed",
+                              PCI_STATUS_DEVSEL_MASK & pci_status));
 
-    if (pci_status & PCI_STATUS_FAST_BACK) {
-        _FDT(fdt_setprop(fdt, offset, "fast-back-to-back", NULL, 0));
-    }
-    if (pci_status & PCI_STATUS_66MHZ) {
-        _FDT(fdt_setprop(fdt, offset, "66mhz-capable", NULL, 0));
-    }
-    if (pci_status & PCI_STATUS_UDF) {
-        _FDT(fdt_setprop(fdt, offset, "udf-supported", NULL, 0));
+        if (pci_status & PCI_STATUS_FAST_BACK) {
+            _FDT(fdt_setprop(fdt, offset, "fast-back-to-back", NULL, 0));
+        }
+        if (pci_status & PCI_STATUS_66MHZ) {
+            _FDT(fdt_setprop(fdt, offset, "66mhz-capable", NULL, 0));
+        }
+        if (pci_status & PCI_STATUS_UDF) {
+            _FDT(fdt_setprop(fdt, offset, "udf-supported", NULL, 0));
+        }
     }
 
+    if (sphb->capi_mode) {
+        default_name = g_strdup_printf("open-capi%04X,%04X", vendor_id,
+                                       device_id);
+    } else {
+        default_name = g_strdup("pci");
+    }
     _FDT(fdt_setprop_string(fdt, offset, "name",
                             pci_find_device_name((ccode >> 16) & 0xff,
                                                  (ccode >> 8) & 0xff,
-                                                 ccode & 0xff)));
+                                                 ccode & 0xff,
+                                                 default_name)));
 
     buf = spapr_phb_get_loc_code(sphb, dev);
     _FDT(fdt_setprop_string(fdt, offset, "ibm,loc-code", buf));
@@ -1345,7 +1362,7 @@ static int spapr_create_pci_child_dt(sPAPRPHBState *phb, PCIDevice *dev,
     int offset;
     gchar *nodename;
 
-    nodename = pci_get_node_name(dev);
+    nodename = pci_get_node_name(dev, phb->capi_mode);
     _FDT(offset = fdt_add_subnode(fdt, node_offset, nodename));
     g_free(nodename);
 
@@ -1614,7 +1631,9 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
         return;
     }
 
-    sphb->dtbusname = g_strdup_printf("pci@%" PRIx64, sphb->buid);
+    sphb->dtbusname = g_strdup_printf("%s@%" PRIx64,
+                                      sphb->capi_mode ? "open-capi" : "pci",
+                                      sphb->buid);
 
     /* Initialize memory regions */
     namebuf = g_strdup_printf("%s.mmio", sphb->dtbusname);
@@ -1656,73 +1675,78 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
 
     bus = pci_register_root_bus(dev, NULL,
                                 pci_spapr_set_irq, pci_spapr_map_irq, sphb,
-                                &sphb->memspace, &sphb->iospace,
+                                &sphb->memspace,
+                                sphb->capi_mode ? NULL : &sphb->iospace,
                                 PCI_DEVFN(0, 0), PCI_NUM_PINS, TYPE_PCI_BUS);
     phb->bus = bus;
     qbus_set_hotplug_handler(BUS(phb->bus), DEVICE(sphb), NULL);
 
-    /*
-     * Initialize PHB address space.
-     * By default there will be at least one subregion for default
-     * 32bit DMA window.
-     * Later the guest might want to create another DMA window
-     * which will become another memory subregion.
-     */
-    namebuf = g_strdup_printf("%s.iommu-root", sphb->dtbusname);
-    memory_region_init(&sphb->iommu_root, OBJECT(sphb),
-                       namebuf, UINT64_MAX);
-    g_free(namebuf);
-    address_space_init(&sphb->iommu_as, &sphb->iommu_root,
-                       sphb->dtbusname);
+    if (!sphb->capi_mode) {
+        /*
+         * Initialize PHB address space.
+         * By default there will be at least one subregion for default
+         * 32bit DMA window.
+         * Later the guest might want to create another DMA window
+         * which will become another memory subregion.
+         */
+        namebuf = g_strdup_printf("%s.iommu-root", sphb->dtbusname);
+        memory_region_init(&sphb->iommu_root, OBJECT(sphb),
+                           namebuf, UINT64_MAX);
+        g_free(namebuf);
+        address_space_init(&sphb->iommu_as, &sphb->iommu_root,
+                           sphb->dtbusname);
 
-    /*
-     * As MSI/MSIX interrupts trigger by writing at MSI/MSIX vectors,
-     * we need to allocate some memory to catch those writes coming
-     * from msi_notify()/msix_notify().
-     * As MSIMessage:addr is going to be the same and MSIMessage:data
-     * is going to be a VIRQ number, 4 bytes of the MSI MR will only
-     * be used.
-     *
-     * For KVM we want to ensure that this memory is a full page so that
-     * our memory slot is of page size granularity.
-     */
+        /*
+         * As MSI/MSIX interrupts trigger by writing at MSI/MSIX vectors,
+         * we need to allocate some memory to catch those writes coming
+         * from msi_notify()/msix_notify().
+         * As MSIMessage:addr is going to be the same and MSIMessage:data
+         * is going to be a VIRQ number, 4 bytes of the MSI MR will only
+         * be used.
+         *
+         * For KVM we want to ensure that this memory is a full page so that
+         * our memory slot is of page size granularity.
+         */
 #ifdef CONFIG_KVM
-    if (kvm_enabled()) {
-        msi_window_size = getpagesize();
-    }
+        if (kvm_enabled()) {
+            msi_window_size = getpagesize();
+        }
 #endif
 
-    memory_region_init_io(&sphb->msiwindow, OBJECT(sphb), &spapr_msi_ops, spapr,
-                          "msi", msi_window_size);
-    memory_region_add_subregion(&sphb->iommu_root, SPAPR_PCI_MSI_WINDOW,
-                                &sphb->msiwindow);
+        memory_region_init_io(&sphb->msiwindow, OBJECT(sphb), &spapr_msi_ops,
+                              spapr, "msi", msi_window_size);
+        memory_region_add_subregion(&sphb->iommu_root, SPAPR_PCI_MSI_WINDOW,
+                                    &sphb->msiwindow);
 
-    pci_setup_iommu(bus, spapr_pci_dma_iommu, sphb);
+        pci_setup_iommu(bus, spapr_pci_dma_iommu, sphb);
 
-    pci_bus_set_route_irq_fn(bus, spapr_route_intx_pin_to_irq);
+        pci_bus_set_route_irq_fn(bus, spapr_route_intx_pin_to_irq);
+    }
 
     QLIST_INSERT_HEAD(&spapr->phbs, sphb, list);
 
-    /* Initialize the LSI table */
-    for (i = 0; i < PCI_NUM_PINS; i++) {
-        uint32_t irq;
-        Error *local_err = NULL;
+    if (!sphb->capi_mode) {
+	    /* Initialize the LSI table */
+            for (i = 0; i < PCI_NUM_PINS; i++) {
+                uint32_t irq;
+                Error *local_err = NULL;
 
-        irq = spapr_irq_findone(spapr, &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
-            error_prepend(errp, "can't allocate LSIs: ");
-            return;
-        }
+                irq = spapr_irq_findone(spapr, &local_err);
+                if (local_err) {
+                    error_propagate(errp, local_err);
+                    error_prepend(errp, "can't allocate LSIs: ");
+                    return;
+                }
 
-        spapr_irq_claim(spapr, irq, true, &local_err);
-        if (local_err) {
-            error_propagate(errp, local_err);
-            error_prepend(errp, "can't allocate LSIs: ");
-            return;
-        }
+                spapr_irq_claim(spapr, irq, true, &local_err);
+                if (local_err) {
+                    error_propagate(errp, local_err);
+                    error_prepend(errp, "can't allocate LSIs: ");
+                    return;
+                }
 
-        sphb->lsi_table[i].irq = irq;
+                sphb->lsi_table[i].irq = irq;
+            }
     }
 
     /* allocate connectors for child PCI devices */
@@ -1733,16 +1757,18 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
         }
     }
 
-    /* DMA setup */
-    for (i = 0; i < windows_supported; ++i) {
-        tcet = spapr_tce_new_table(DEVICE(sphb), sphb->dma_liobn[i]);
-        if (!tcet) {
-            error_setg(errp, "Creating window#%d failed for %s",
-                       i, sphb->dtbusname);
-            return;
+    if (!sphb->capi_mode) {
+        /* DMA setup */
+        for (i = 0; i < windows_supported; ++i) {
+            tcet = spapr_tce_new_table(DEVICE(sphb), sphb->dma_liobn[i]);
+            if (!tcet) {
+                error_setg(errp, "Creating window#%d failed for %s",
+                           i, sphb->dtbusname);
+                return;
+            }
+            memory_region_add_subregion(&sphb->iommu_root, 0,
+                                        spapr_tce_get_iommu(tcet));
         }
-        memory_region_add_subregion(&sphb->iommu_root, 0,
-                                    spapr_tce_get_iommu(tcet));
     }
 
     sphb->msi = g_hash_table_new_full(g_int_hash, g_int_equal, g_free, g_free);
@@ -1782,6 +1808,10 @@ static void spapr_phb_reset(DeviceState *qdev)
 {
     sPAPRPHBState *sphb = SPAPR_PCI_HOST_BRIDGE(qdev);
 
+    if (sphb->capi_mode) {
+        return;
+    }
+
     spapr_phb_dma_reset(sphb);
 
     /* Reset the IOMMU state */
@@ -1815,6 +1845,7 @@ static Property spapr_phb_properties[] = {
                      pre_2_8_migration, false),
     DEFINE_PROP_BOOL("pcie-extended-configuration-space", sPAPRPHBState,
                      pcie_ecs, true),
+    DEFINE_PROP_BOOL("capi-mode", sPAPRPHBState, capi_mode, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 
@@ -2108,13 +2139,27 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
     sPAPRFDT s_fdt;
 
     /* Start populating the FDT */
-    nodename = g_strdup_printf("pci@%" PRIx64, phb->buid);
+    nodename = g_strdup_printf("%s@%" PRIx64,
+                               phb->capi_mode ? "open-capi" : "pci",
+                               phb->buid);
     _FDT(bus_off = fdt_add_subnode(fdt, 0, nodename));
     g_free(nodename);
 
     /* Write PHB properties */
-    _FDT(fdt_setprop_string(fdt, bus_off, "device_type", "pci"));
-    _FDT(fdt_setprop_string(fdt, bus_off, "compatible", "IBM,Logical_PHB"));
+    if (phb->capi_mode) {
+        const char compatible[] = "Open-CAPI_3.0\0Open-CAPI_3.1";
+
+        _FDT((fdt_setprop_string(fdt, bus_off, "device_type", "open-capi")));
+        _FDT((fdt_setprop_string(fdt, bus_off, "model", "Open-CAPI_PHB")));
+        _FDT((fdt_setprop(fdt, bus_off, "compatible", compatible,
+                          sizeof(compatible))));
+    } else {
+        _FDT(fdt_setprop_string(fdt, bus_off, "device_type", "pci"));
+        _FDT(fdt_setprop_string(fdt, bus_off, "compatible", "IBM,Logical_PHB"));
+        _FDT(fdt_setprop_cell(fdt, bus_off, "ibm,pe-total-#msi",
+                              XICS_IRQS_SPAPR));
+    }
+
     _FDT(fdt_setprop_cell(fdt, bus_off, "#address-cells", 0x3));
     _FDT(fdt_setprop_cell(fdt, bus_off, "#size-cells", 0x2));
     _FDT(fdt_setprop_cell(fdt, bus_off, "#interrupt-cells", 0x1));
@@ -2125,12 +2170,14 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
     _FDT(fdt_setprop_cell(fdt, bus_off, "ibm,pci-config-space-type", 0x1));
     _FDT(fdt_setprop_cell(fdt, bus_off, "ibm,pe-total-#msi", XICS_IRQS_SPAPR));
 
-    /* Dynamic DMA window */
-    if (phb->ddw_enabled) {
-        _FDT(fdt_setprop(fdt, bus_off, "ibm,ddw-applicable", &ddw_applicable,
-                         sizeof(ddw_applicable)));
-        _FDT(fdt_setprop(fdt, bus_off, "ibm,ddw-extensions",
-                         &ddw_extensions, sizeof(ddw_extensions)));
+    if (!phb->capi_mode) {
+        /* Dynamic DMA window */
+        if (phb->ddw_enabled) {
+            _FDT(fdt_setprop(fdt, bus_off, "ibm,ddw-applicable", &ddw_applicable,
+                             sizeof(ddw_applicable)));
+            _FDT(fdt_setprop(fdt, bus_off, "ibm,ddw-extensions",
+                             &ddw_extensions, sizeof(ddw_extensions)));
+        }
     }
 
     /* Advertise NUMA via ibm,associativity */
@@ -2139,35 +2186,37 @@ int spapr_populate_pci_dt(sPAPRPHBState *phb,
                          sizeof(associativity)));
     }
 
-    /* Build the interrupt-map, this must matches what is done
-     * in pci_spapr_map_irq
-     */
-    _FDT(fdt_setprop(fdt, bus_off, "interrupt-map-mask",
-                     &interrupt_map_mask, sizeof(interrupt_map_mask)));
-    for (i = 0; i < PCI_SLOT_MAX; i++) {
-        for (j = 0; j < PCI_NUM_PINS; j++) {
-            uint32_t *irqmap = interrupt_map[i*PCI_NUM_PINS + j];
-            int lsi_num = pci_spapr_swizzle(i, j);
+    if (!phb->capi_mode) {
+        /* Build the interrupt-map, this must matches what is done
+         * in pci_spapr_map_irq
+         */
+        _FDT(fdt_setprop(fdt, bus_off, "interrupt-map-mask",
+                         &interrupt_map_mask, sizeof(interrupt_map_mask)));
+        for (i = 0; i < PCI_SLOT_MAX; i++) {
+            for (j = 0; j < PCI_NUM_PINS; j++) {
+                uint32_t *irqmap = interrupt_map[i*PCI_NUM_PINS + j];
+                int lsi_num = pci_spapr_swizzle(i, j);
 
-            irqmap[0] = cpu_to_be32(b_ddddd(i)|b_fff(0));
-            irqmap[1] = 0;
-            irqmap[2] = 0;
-            irqmap[3] = cpu_to_be32(j+1);
-            irqmap[4] = cpu_to_be32(xics_phandle);
-            spapr_dt_xics_irq(&irqmap[5], phb->lsi_table[lsi_num].irq, true);
+                irqmap[0] = cpu_to_be32(b_ddddd(i)|b_fff(0));
+                irqmap[1] = 0;
+                irqmap[2] = 0;
+                irqmap[3] = cpu_to_be32(j+1);
+                irqmap[4] = cpu_to_be32(xics_phandle);
+                spapr_dt_xics_irq(&irqmap[5], phb->lsi_table[lsi_num].irq, true);
+            }
         }
-    }
-    /* Write interrupt map */
-    _FDT(fdt_setprop(fdt, bus_off, "interrupt-map", &interrupt_map,
-                     sizeof(interrupt_map)));
+        /* Write interrupt map */
+        _FDT(fdt_setprop(fdt, bus_off, "interrupt-map", &interrupt_map,
+                         sizeof(interrupt_map)));
 
-    tcet = spapr_tce_find_by_liobn(phb->dma_liobn[0]);
-    if (!tcet) {
-        return -1;
+        tcet = spapr_tce_find_by_liobn(phb->dma_liobn[0]);
+        if (!tcet) {
+            return -1;
+        }
+        spapr_dma_dt(fdt, bus_off, "ibm,dma-window",
+                     tcet->liobn, tcet->bus_offset,
+                     tcet->nb_table << tcet->page_shift);
     }
-    spapr_dma_dt(fdt, bus_off, "ibm,dma-window",
-                 tcet->liobn, tcet->bus_offset,
-                 tcet->nb_table << tcet->page_shift);
 
     /* Walk the bridges and program the bus numbers*/
     spapr_phb_pci_enumerate(phb);

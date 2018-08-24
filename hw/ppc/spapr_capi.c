@@ -87,17 +87,17 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
 
     /* Configuration Space Header */
     pci_set_word(pdev->config + PCI_COMMAND, PCI_COMMAND_MEMORY);
-    pci_set_word(pdev->config + PCI_STATUS, 0x1000);
+    pci_set_word(pdev->config + PCI_STATUS, PCI_STATUS_CAP_LIST);
     pci_set_byte(pdev->config + PCI_REVISION_ID, 0x00);
     pci_set_byte(pdev->config + PCI_HEADER_TYPE, 0x80);
 
-    /* mmio BAR 0 - 64MB*/
+    /* mmio BAR 0 - 64MB */
     memory_region_init_io(&s->mmio, OBJECT(s), &capi_mmio_ops,
-                          s, "capi-mmio", 0x100000uLL);
+                          s, "capi-mmio", 0x4000000);
 
     pci_register_bar(pdev, 0,
-		     PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
-		     &s->mmio);
+            PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
+            &s->mmio);
 
     /* Capabilities ? */
     /*pcie_endpoint_cap_init(pdev, 0x40);*/

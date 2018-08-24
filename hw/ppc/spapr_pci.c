@@ -1210,7 +1210,6 @@ static const char *pci_find_device_name(uint8_t class, uint8_t subclass,
         }
         piface++;
     }
-
     return name;
 }
 
@@ -1354,41 +1353,43 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
         _FDT(fdt_setprop_cell(fdt, offset, "ibm,pci-config-space-type", 0x1));
     }
 
-    /* From npu2_add_mmio_regs() - skiboot */
     if (sphb->capi_mode) {
-	uint32_t irq;
-	Error *local_err = NULL;
-	sPAPRMachineState *spapr =
-        (sPAPRMachineState *) object_dynamic_cast(qdev_get_machine(),
-                                                  TYPE_SPAPR_MACHINE);
+        uint32_t irq;
+        Error *local_err = NULL;
+        sPAPRMachineState *spapr =
+                (sPAPRMachineState *) object_dynamic_cast(qdev_get_machine(),
+                                                          TYPE_SPAPR_MACHINE);
+        uint64_t disr = 0x00060302001d0000;
+        uint64_t dar = 0x00060302001d0008;
+        uint64_t tfc = 0x00060302001d0010;
+        uint64_t pe_handle = 0x00060302001d0018;
+        uint32_t reg[] = {
+            cpu_to_be32((disr >> 32) & 0xffffffff),
+            cpu_to_be32(disr & 0xffffffff),
+            cpu_to_be32((dar >> 32) & 0xffffffff),
+            cpu_to_be32(dar & 0xffffffff),
+            cpu_to_be32((tfc >> 32) & 0xffffffff),
+            cpu_to_be32(tfc & 0xffffffff),
+            cpu_to_be32((pe_handle >> 32) & 0xffffffff),
+            cpu_to_be32(pe_handle & 0xffffffff)
+        };
 
-	uint32_t reg[] = {
-		cpu_to_be32(0x00060302),
-		cpu_to_be32(0x001d0000),
-		cpu_to_be32(0x00060302),
-		cpu_to_be32(0x001d0008),
-		cpu_to_be32(0x00060302),
-		cpu_to_be32(0x001d0010),
-		cpu_to_be32(0x00060302),
-		cpu_to_be32(0x001d0018)
-	};
-
-	/* Pass the hw irq number for the translation fault irq */
+        /* Pass the hw irq number for the translation fault irq */
         irq = spapr_irq_findone(spapr, &local_err);
         if (local_err) {
-                irq = 0x38;
+            irq = 0x0;
         } else {
-        	spapr_irq_claim(spapr, irq, false, &local_err);
-        	if (local_err) {
-			irq = 0x39;
-		}
+            spapr_irq_claim(spapr, irq, false, &local_err);
+            if (local_err) {
+                irq = 0x0;
+            }
         }
-	_FDT(fdt_setprop_cell(fdt, offset, "ibm,opal-xsl-irq", irq));
+        _FDT(fdt_setprop_cell(fdt, offset, "ibm,xsl-irq", irq));
 
-	/* Add the addresses of the registers needed by the OS to handle
-	 * faults. The OS accesses them by mmio.
-	 */
-	_FDT(fdt_setprop(fdt, offset, "ibm,opal-xsl-mmio", reg, sizeof(reg)));
+        /* Add the addresses of the registers needed by the OS to handle
+         * faults. The OS accesses them by mmio.
+         */
+        _FDT(fdt_setprop(fdt, offset, "ibm,xsl-mmio", reg, sizeof(reg)));
     }
 }
 

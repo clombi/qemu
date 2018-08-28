@@ -60,14 +60,14 @@
 
 static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    fprintf(stderr, "capi_mmio_read 0x%x: 0x%x\n", (unsigned) addr, (unsigned) size);
+    fprintf(stderr, "capi_mmio_read - addr: 0x%x,  size: 0x%x\n", (unsigned) addr, (unsigned) size);
     return 0;
 }
 
 static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
-    fprintf(stderr, "capi_mmio_write\n");
+    fprintf(stderr, "capi_mmio_write - addr: 0x%x, val: 0x%x\n", (unsigned) addr, (unsigned) val);
 }
 
 static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
@@ -78,10 +78,10 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     static const MemoryRegionOps capi_mmio_ops = {
         .read = capi_mmio_read,
         .write = capi_mmio_write,
-        .endianness = DEVICE_BIG_ENDIAN,
+        .endianness = DEVICE_LITTLE_ENDIAN,
         .impl = {
-            .min_access_size = 1,
-            .max_access_size = 1,
+            .min_access_size = 4,
+            .max_access_size = 8,
         }
     };
 

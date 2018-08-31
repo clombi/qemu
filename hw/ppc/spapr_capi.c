@@ -26,7 +26,7 @@
 #define OCXL_EXT_CAP_ID_PASID                 0x1B
 #define OCXL_EXT_CAP_ID_DVSEC                 0x23
 
-#define OCXL_PASID_MAX_WIDTH           	      0x4
+#define OCXL_PASID_MAX_WIDTH                  0x4
 
 #define OCXL_DVSEC_VENDOR_OFFSET              0x4
 #define OCXL_DVSEC_ID_OFFSET                  0x8
@@ -58,16 +58,83 @@
 #define   OCXL_DVSEC_VENDOR_TLX_VERS            0x10
 #define   OCXL_DVSEC_VENDOR_DLX_VERS            0x20
 
+#define   OCXL_AFU_PER_PPROCESS_PSA_ADDR        0x2000000
+
+#define MEMCPY_WE_CMD_VALID	(0x1 << 0)
+
+struct memcpy_work_element {
+	volatile uint8_t cmd; /* valid, wrap, cmd */
+	volatile uint8_t status;
+	uint16_t length;
+	uint8_t cmd_extra;
+	uint8_t reserved[3];
+	uint64_t atomic_op;
+	uint64_t src;  /* also irq EA or atomic_op2 */
+	uint64_t dst;
+} __packed;
+
+static void *memcopy_status_t(void *arg)
+{
+    hwaddr addr = *(hwaddr *)arg;
+    struct timeval test_timeout, temp;
+    struct memcpy_work_element first_we;
+
+    temp.tv_sec = 5;
+    temp.tv_usec = 0;
+
+    gettimeofday(&test_timeout, NULL);
+    timeradd(&test_timeout, &temp, &test_timeout);
+
+    for (;; gettimeofday(&temp, NULL)) {
+        if (timercmp(&temp, &test_timeout, >)) {
+	    fprintf(stderr, "%s - timeout polling for completion\n",
+                    __func__);
+            break;
+        }
+	/* wait the validation of the command */
+        cpu_physical_memory_read(addr & ~0xfff, &first_we, sizeof(first_we));
+	fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, addr & ~0xfff, first_we.cmd);
+        if (first_we.cmd == MEMCPY_WE_CMD_VALID) {
+	    /* copy data from src to dst */
+            break;
+        }
+    }
+    return NULL;
+}
+
 static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    fprintf(stderr, "capi_mmio_read - addr: 0x%x,  size: 0x%x\n", (unsigned) addr, (unsigned) size);
+    fprintf(stderr, "%s - addr: 0x%lx,  size: 0x%x\n",
+            __func__, addr, size);
     return 0;
 }
 
 static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
-    fprintf(stderr, "capi_mmio_write - addr: 0x%x, val: 0x%x\n", (unsigned) addr, (unsigned) val);
+    sPAPRCAPIDeviceState *s = opaque;
+    uint64_t wed = 0;
+    pthread_t thr;
+
+    fprintf(stderr, "%s - addr: 0x%lx, val: 0x%lx\n",
+            __func__, addr, val);
+
+    switch (addr) {
+    case OCXL_AFU_PER_PPROCESS_PSA_ADDR:
+        /* someone is writting the work element descriptor (wed) address
+         * in AFU per Process PSA area.
+         * So we can access to the first command and so the status of this
+         * one
+         */
+         s->wed_l = val;
+	 break;
+    case OCXL_AFU_PER_PPROCESS_PSA_ADDR + 0x4:
+         s->wed_h = val;
+	 wed = (s->wed_h << 32) + s->wed_l;
+	 fprintf(stderr, "%s - wed: 0x%lx. Create thread to update status\n", __func__, wed);
+         pthread_create(&thr, NULL, memcopy_status_t, &wed);
+	 break;
+    }
 }
 
 static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
@@ -81,7 +148,7 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
         .endianness = DEVICE_LITTLE_ENDIAN,
         .impl = {
             .min_access_size = 4,
-            .max_access_size = 8,
+            .max_access_size = 4,
         }
     };
 

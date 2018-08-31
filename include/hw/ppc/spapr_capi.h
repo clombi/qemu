@@ -30,5 +30,7 @@ typedef struct sPAPRCAPIDeviceState {
     PCIDevice parent;
 
     MemoryRegion mmio;
+    uint64_t wed_l;
+    uint64_t wed_h;
 } sPAPRCAPIDeviceState;
 #endif

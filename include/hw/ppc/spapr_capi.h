@@ -34,5 +34,7 @@ typedef struct sPAPRCAPIDeviceState {
     uint64_t wed_h;
     uint64_t wed;
     int pasid;
+
+    uint16_t dvsec_afu_info_id;
 } sPAPRCAPIDeviceState;
 #endif

@@ -58,6 +58,16 @@
 #define   OCXL_DVSEC_VENDOR_TLX_VERS            0x10
 #define   OCXL_DVSEC_VENDOR_DLX_VERS            0x20
 
+#define OCXL_DVSEC_TEMPL_VERSION         0x0
+#define OCXL_DVSEC_TEMPL_NAME            0x4
+#define OCXL_DVSEC_TEMPL_AFU_VERSION     0x1C
+#define OCXL_DVSEC_TEMPL_MMIO_GLOBAL     0x20
+#define OCXL_DVSEC_TEMPL_MMIO_GLOBAL_SZ  0x28
+#define OCXL_DVSEC_TEMPL_MMIO_PP         0x30
+#define OCXL_DVSEC_TEMPL_MMIO_PP_SZ      0x38
+#define OCXL_DVSEC_TEMPL_MEM_SZ          0x3C
+#define OCXL_DVSEC_TEMPL_WWID            0x40
+
 /*BAR0 + x200_0000 : BAR0 + x3FF_FFFF
  *AFU per Process PSA (64kB per Process, max 512 processes)
  */
@@ -230,6 +240,9 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     pcie_add_capability(pdev, OCXL_EXT_CAP_ID_DVSEC, 0x1, offset, cap_size);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_VENDOR_OFFSET, PCI_VENDOR_ID_IBM);
     pci_set_long(pdev->config + offset + OCXL_DVSEC_ID_OFFSET, OCXL_DVSEC_AFU_INFO_ID);
+    pci_set_byte(pdev->wmask + offset + OCXL_DVSEC_AFU_INFO_AFU_IDX, 0x3f);
+    pci_set_long(pdev->wmask + offset + OCXL_DVSEC_AFU_INFO_OFF, 0xffffffff);
+    s->dvsec_afu_info_id = offset;
 
     /* Designated Vendor Specific Extended Capabilities - AFU Control */
     offset = next_offset;
@@ -246,6 +259,146 @@ static void spapr_capi_device_exit(PCIDevice *pdev)
 {
 }
 
+static uint32_t spapr_capi_read_config(PCIDevice *pdev, uint32_t addr, int l)
+{
+    sPAPRCAPIDeviceState *s = SPAPR_CAPI_DEVICE(pdev);
+    uint32_t val;
+
+    if (addr == s->dvsec_afu_info_id + OCXL_DVSEC_AFU_INFO_DATA) {
+        uint32_t dvsec_afu_info_off =
+            s->dvsec_afu_info_id + OCXL_DVSEC_AFU_INFO_OFF;
+        int32_t offset =
+            pci_default_read_config(pdev, dvsec_afu_info_off, 4) & 0x7ffffff;
+
+        if (offset >= OCXL_DVSEC_TEMPL_WWID) {
+            fprintf(stderr, "%s: OCXL_DVSEC_AFU_INFO_DATA 0x%x\n", __func__,
+                    offset);
+            return 0;
+        } else if (offset >= OCXL_DVSEC_TEMPL_MEM_SZ) {
+            uint8_t templ_mem_sz = 0x1a;
+
+            val =
+                templ_mem_sz & 0xff;
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MEM_SZ 0x%x\n", __func__,
+                    val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_PP_SZ) {
+            uint32_t templ_mmio_pp_stride = 0x1;
+
+            val =
+                templ_mmio_pp_stride << 16;
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_PP_SZ 0x%x\n",
+                    __func__, val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_PP) {
+            uint8_t templ_mmio_pp = 0x0;
+            uint16_t templ_mmio_pp_offset_lo = 0x200;
+            uint32_t templ_mmio_pp_offset_hi = 0x0;
+
+            if (offset == OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
+                val =
+                    templ_mmio_pp +
+                    (templ_mmio_pp_offset_lo << 16);
+            } else {
+                val = templ_mmio_pp_offset_hi;
+            }
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_PP 0x%x\n", __func__,
+                    val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_GLOBAL_SZ) {
+            uint32_t templ_mmio_global_size = 0x2000000;
+
+            val = templ_mmio_global_size;
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_GLOBAL_SZ 0x%x\n",
+                    __func__, val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
+            uint8_t templ_mmio_global = 0x0;
+            uint16_t templ_mmio_global_offset_lo = 0x0;
+            uint32_t templ_mmio_global_offset_hi = 0x0;
+
+            if (offset == OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
+                val =
+                    templ_mmio_global +
+                    (templ_mmio_global_offset_lo << 16);
+            } else {
+                val = templ_mmio_global_offset_hi;
+            }
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_GLOBAL 0x%x\n", __func__,
+                    val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_AFU_VERSION) {
+            uint8_t templ_afu_major_version = 0x1;
+            uint8_t templ_afu_minor_version = 0x0;
+
+            val =
+                (templ_afu_minor_version << 16) +
+                (templ_afu_major_version << 24);
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_VERSION 0x%x\n", __func__,
+                    val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_NAME) {
+            const char *templ_name = "IBM,MEMCPY3";
+            int i;
+
+            offset -= OCXL_DVSEC_TEMPL_NAME;
+            val = 0;
+
+            for (i = offset; i < offset + l; i++) {
+                int j = 2 * offset + l - i - 1;
+
+                val <<= 8;
+                if (j < strlen(templ_name)) {
+                    val |= templ_name[j];
+                }
+            }
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_NAME[%d] 0x%x\n", __func__,
+                    offset, val);
+#endif
+        } else if (offset >= OCXL_DVSEC_TEMPL_VERSION) {
+            uint8_t templ_major_version = 0x0;
+            uint8_t templ_minor_version = 0x5;
+            uint16_t templ_size = 0x58;
+
+            val =
+                templ_minor_version +
+                (templ_major_version << 8) +
+                (templ_size << 16);
+#if 0
+            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_VERSION 0x%x\n", __func__,
+                    val);
+#endif
+        }
+    } else {
+        val = pci_default_read_config(pdev, addr, l);
+#if 0
+        fprintf(stderr, "%s: 0x%x 0x%x (%d)\n", __func__, addr, val, l);
+#endif
+    }
+    return val;
+}
+
+static void spapr_capi_write_config(PCIDevice *pdev, uint32_t addr,
+                                    uint32_t val, int l)
+{
+    sPAPRCAPIDeviceState *s = SPAPR_CAPI_DEVICE(pdev);
+
+    if (addr == s->dvsec_afu_info_id + OCXL_DVSEC_AFU_INFO_OFF) {
+        val |= 1<<31; /* Valid bit */
+    }
+#if 0
+    fprintf(stderr, "%s: 0x%x 0x%x (%d)\n", __func__, addr, val, l);
+#endif
+    pci_default_write_config(pdev, addr, val, l);
+}
+
 static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
@@ -258,6 +411,8 @@ static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
     pc->class_id = 0x1200; /* from CAPI adapter config space on zaiuslp14 */
     pc->subsystem_vendor_id = PCI_VENDOR_ID_IBM;
     pc->subsystem_id = 0x060f; /* from CAPI adapter config space on zaiuslp14 */
+    pc->config_read = spapr_capi_read_config;
+    pc->config_write = spapr_capi_write_config;
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->desc = "sPAPR CAPI device";
     dc->user_creatable = true;

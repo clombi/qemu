@@ -26,7 +26,7 @@
 #define OCXL_EXT_CAP_ID_PASID                 0x1B
 #define OCXL_EXT_CAP_ID_DVSEC                 0x23
 
-#define OCXL_PASID_MAX_WIDTH           	      0x4
+#define OCXL_PASID_MAX_WIDTH                  0x4
 
 #define OCXL_DVSEC_VENDOR_OFFSET              0x4
 #define OCXL_DVSEC_ID_OFFSET                  0x8
@@ -58,16 +58,111 @@
 #define   OCXL_DVSEC_VENDOR_TLX_VERS            0x10
 #define   OCXL_DVSEC_VENDOR_DLX_VERS            0x20
 
+/*BAR0 + x200_0000 : BAR0 + x3FF_FFFF
+ *AFU per Process PSA (64kB per Process, max 512 processes)
+ */
+#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_START  0x2000000
+#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_END    0x3FFFFFF
+#define OCXL_AFU_PER_PPROCESS_PSA_LENGTH      0x10000
+
+#define MEMCPY_WE_CMD_VALID	(0x1 << 0)
+
+struct memcpy_work_element {
+    volatile uint8_t cmd; /* valid, wrap, cmd */
+    volatile uint8_t status;
+    uint16_t length;
+    uint8_t cmd_extra;
+    uint8_t reserved[3];
+    uint64_t atomic_op;
+    uint64_t src;  /* also irq EA or atomic_op2 */
+    uint64_t dst;
+} __packed;
+
+static void *memcopy_status_t(void *arg)
+{
+    sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
+    struct timeval test_timeout, temp;
+    struct memcpy_work_element first_we;
+    
+    temp.tv_sec = 5;
+    temp.tv_usec = 0;
+
+    gettimeofday(&test_timeout, NULL);
+    timeradd(&test_timeout, &temp, &test_timeout);
+
+    fprintf(stderr, "%s - (pasid: %d) addr: %#lx\n", __func__, s->pasid, s->wed);
+    for (;; gettimeofday(&temp, NULL)) {
+        if (timercmp(&temp, &test_timeout, >)) {
+            fprintf(stderr, "%s - timeout polling for completion\n",
+                    __func__);
+            break;
+        }
+
+        /* wait the validation of the command */
+        /*cpu_physical_memory_read(s->wed, &first_we, sizeof(first_we));*
+        /*fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, s->wed, first_we.cmd);*/
+
+        if (first_we.cmd == MEMCPY_WE_CMD_VALID) {
+        /* copy data from src to dst */
+            break;
+        }
+    }
+    return NULL;
+}
+
 static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
-    fprintf(stderr, "capi_mmio_read - addr: 0x%x,  size: 0x%x\n", (unsigned) addr, (unsigned) size);
+    fprintf(stderr, "%s - addr: 0x%lx,  size: 0x%x\n",
+            __func__, addr, size);
+
+    switch (addr & 0xFF) {
+    case 0x10: /* Process Status Register 64bits */
+        return 0x3; /* Process Element has been terminated/Removed */
+    break;
+    case 0x14: 
+    break;
+    }
     return 0;
 }
 
 static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
-    fprintf(stderr, "capi_mmio_write - addr: 0x%x, val: 0x%x\n", (unsigned) addr, (unsigned) val);
+    sPAPRCAPIDeviceState *s = opaque;
+    pthread_t thr;
+
+    fprintf(stderr, "%s - addr: 0x%lx, val: 0x%lx\n",
+            __func__, addr, val);
+
+    if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
+        (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
+    {    
+         /* someone is writting the work element descriptor (wed) address$
+          * in AFU per Process PSA area.$
+          * So we can access to the first command and so the status of this$
+          * one
+          *
+          * WED Register (x0000)
+          *     [63:12] Base EA of the start of the work element queue.
+          *$
+          */
+         switch (addr & 0xFF) {
+         case 0x0:
+             s->wed_l = val & ~0xfff;
+             s->pasid = (addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH;
+         break;
+         case 0x4:
+             s->wed_h = val;
+             s->wed = (s->wed_h << 32) + s->wed_l;
+
+             /* start a thread to update the memcopy status */
+             pthread_create(&thr, NULL, memcopy_status_t, s);
+         break;
+         case 0x28:
+         case 0x2C:
+         break;
+         }
+    }
 }
 
 static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
@@ -81,7 +176,7 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
         .endianness = DEVICE_LITTLE_ENDIAN,
         .impl = {
             .min_access_size = 4,
-            .max_access_size = 8,
+            .max_access_size = 4,
         }
     };
 

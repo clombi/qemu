@@ -1390,6 +1390,18 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
          * faults. The OS accesses them by mmio.
          */
         _FDT(fdt_setprop(fdt, offset, "ibm,xsl-mmio", reg, sizeof(reg)));
+
+	/* Pass the afu hw irq number */
+        irq = spapr_irq_findone(spapr, &local_err);
+        if (local_err) {
+            irq = 0x0;
+        } else {
+            spapr_irq_claim(spapr, irq, false, &local_err);
+            if (local_err) {
+                irq = 0x0;
+            }
+        }
+        _FDT(fdt_setprop_cell(fdt, offset, "ibm,afu-irq", irq));
     }
 }
 

@@ -99,7 +99,7 @@ static void *memcopy_status_t(void *arg)
         }
 
         /* wait the validation of the command */
-        /*cpu_physical_memory_read(s->wed, &first_we, sizeof(first_we));*
+        /*cpu_physical_memory_read(s->wed, &first_we, sizeof(first_we));*/
         /*fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, s->wed, first_we.cmd);*/
 
         if (first_we.cmd == MEMCPY_WE_CMD_VALID) {

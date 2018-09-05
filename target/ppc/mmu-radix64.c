@@ -267,7 +267,6 @@ hwaddr ppc_radix64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong eaddr)
         return eaddr & 0x0FFFFFFFFFFFFFFFULL;
     }
 
-    /* Virtual Mode Access - get the fully qualified address */
     if (!ppc_radix64_get_fully_qualified_addr(env, eaddr, &lpid, &pid)) {
         return -1;
     }
@@ -294,4 +293,49 @@ hwaddr ppc_radix64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong eaddr)
     }
 
     return raddr & TARGET_PAGE_MASK;
+}
+
+hwaddr ppc_radix64_get_phys_page_virtual(target_ulong eaddr, uint64_t pid)
+{
+    PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
+    CPUState *cs = CPU(cpu);
+    PPCVirtualHypervisor *vhyp = cpu->vhyp;
+    PPCVirtualHypervisorClass *vhc = PPC_VIRTUAL_HYPERVISOR_GET_CLASS(vhyp);
+    hwaddr raddr, pte_addr;
+    uint64_t offset, size, patbe, prtbe0, pte;
+    int page_size, fault_cause = 0;
+
+    /* Virtual Mode Access - get the fully qualified address */
+    switch (eaddr & R_EADDR_QUADRANT) {
+    case R_EADDR_QUADRANT0: /* Guest application */
+    case R_EADDR_QUADRANT3: /* Guest OS */
+        break;
+    case R_EADDR_QUADRANT1: /* Illegal */
+    case R_EADDR_QUADRANT2:
+            return -1;
+    }
+
+    /* Get Process Table */
+    patbe = vhc->get_patbe(vhyp);
+
+    /* Index Process Table by PID to Find Corresponding Process Table Entry */
+    offset = pid * sizeof(struct prtb_entry);
+    size = 1ULL << ((patbe & PATBE1_R_PRTS) + 12);
+    if (offset >= size) {
+        /* offset exceeds size of the process table */
+        return -1;
+    }
+    prtbe0 = ldq_phys(cs->as, (patbe & PATBE1_R_PRTB) + offset);
+
+    /* Walk Radix Tree from Process Table Entry to Convert EA to RA */
+    page_size = PRTBE_R_GET_RTS(prtbe0);
+    pte = ppc_radix64_walk_tree(cpu, eaddr & R_EADDR_MASK,
+                                prtbe0 & PRTBE_R_RPDB, prtbe0 & PRTBE_R_RPDS,
+                                &raddr, &page_size, &fault_cause, &pte_addr);
+    if (!pte) {
+        fprintf(stderr, "%s: no PTE. Fault = %x\n", __func__, fault_cause);
+        return -1;
+    }
+
+    return raddr;
 }

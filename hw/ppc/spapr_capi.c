@@ -21,6 +21,8 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "hw/ppc/spapr_capi.h"
+#include "cpu.h"
+#include "mmu-radix64.h"
 
 /* from kernel header <misc/ocxl-config.h> */
 #define OCXL_EXT_CAP_ID_PASID                 0x1B
@@ -94,6 +96,7 @@ static void *memcopy_status_t(void *arg)
     struct timeval test_timeout, temp;
     struct memcpy_work_element first_we;
     uint32_t pid = pci_default_read_config(PCI_DEVICE(s), 0xfe0, 4);
+    hwaddr wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
 
     temp.tv_sec = 5;
     temp.tv_usec = 0;
@@ -101,8 +104,9 @@ static void *memcopy_status_t(void *arg)
     gettimeofday(&test_timeout, NULL);
     timeradd(&test_timeout, &temp, &test_timeout);
 
-    fprintf(stderr, "%s - (pasid: %d) addr: %#lx\n", __func__,
-            s->pasid, s->wed, pid);
+    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx pidr: %d\n",
+            __func__, s->pasid, s->wed, wed, pid);
+
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
             fprintf(stderr, "%s - timeout polling for completion\n",
@@ -111,11 +115,27 @@ static void *memcopy_status_t(void *arg)
         }
 
         /* wait the validation of the command */
-        /*cpu_physical_memory_read(s->wed, &first_we, sizeof(first_we));*/
-        /*fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, s->wed, first_we.cmd);*/
+        cpu_physical_memory_read(wed, &first_we, sizeof(first_we));
+        fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, wed,
+                first_we.cmd);
 
         if (first_we.cmd == MEMCPY_WE_CMD_VALID) {
-        /* copy data from src to dst */
+            hwaddr src = ppc_radix64_get_phys_page_virtual(first_we.src, pid);
+            hwaddr dst = ppc_radix64_get_phys_page_virtual(first_we.dst, pid);
+            char *buf;
+
+            /* copy data from src to dst */
+            fprintf(stderr, "%s - copy %d bytes from "
+                    "%#lx (EA %#lx) to %#lx (EA %#lx)\n",
+                    __func__, first_we.length, first_we.src, src,
+                    first_we.dst, dst);
+            buf = g_malloc(first_we.length);
+            cpu_physical_memory_read(src, buf, first_we.length);
+            cpu_physical_memory_write(dst, buf, first_we.length);
+            g_free(buf);
+
+            stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
+            s->status = 0; /* The call succeeded */
             break;
         }
     }
@@ -124,12 +144,14 @@ static void *memcopy_status_t(void *arg)
 
 static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
+    sPAPRCAPIDeviceState *s = opaque;
+
     fprintf(stderr, "%s - addr: 0x%lx,  size: 0x%x\n",
             __func__, addr, size);
 
     switch (addr & 0xFF) {
     case 0x10: /* Process Status Register 64bits */
-        return 0x3; /* Process Element has been terminated/Removed */
+        return s->status;
     break;
     case 0x14: 
     break;
@@ -166,6 +188,7 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
          case 0x4:
              s->wed_h = val;
              s->wed = (s->wed_h << 32) + s->wed_l;
+             s->status = 0x3; /* Process Element has been terminated/Removed */
 
              /* start a thread to update the memcopy status */
              pthread_create(&thr, NULL, memcopy_status_t, s);

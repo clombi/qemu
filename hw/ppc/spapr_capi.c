@@ -93,14 +93,16 @@ static void *memcopy_status_t(void *arg)
     sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
     struct timeval test_timeout, temp;
     struct memcpy_work_element first_we;
-    
+    uint32_t pid = pci_default_read_config(PCI_DEVICE(s), 0xfe0, 4);
+
     temp.tv_sec = 5;
     temp.tv_usec = 0;
 
     gettimeofday(&test_timeout, NULL);
     timeradd(&test_timeout, &temp, &test_timeout);
 
-    fprintf(stderr, "%s - (pasid: %d) addr: %#lx\n", __func__, s->pasid, s->wed);
+    fprintf(stderr, "%s - (pasid: %d) addr: %#lx\n", __func__,
+            s->pasid, s->wed, pid);
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
             fprintf(stderr, "%s - timeout polling for completion\n",
@@ -253,6 +255,9 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ENABLE, 0x01);
     pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_PASID_SUP, 0x9);
     pci_set_byte(pdev->config + offset + OCXL_DVSEC_AFU_CTRL_ACTAG_SUP, 0x20);
+
+    /* FIXME: temporary hack to access PIDR */
+    pci_set_long(pdev->wmask + 0xfe0, 0xffffffff);
 }
 
 static void spapr_capi_device_exit(PCIDevice *pdev)

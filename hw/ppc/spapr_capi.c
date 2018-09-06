@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "hw/pci-host/spapr.h"
 #include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_capi.h"
 #include "cpu.h"
@@ -91,14 +92,38 @@ struct memcpy_work_element {
     uint64_t dst;
 } __packed;
 
+struct process_element {
+    __be64 config_state;
+    __be32 reserved1[11];
+    __be32 lpid;
+    __be32 tid;
+    __be32 pid;
+    __be32 reserved2[10];
+    __be64 amr;
+    __be32 reserved3[3];
+    __be32 software_state;
+};
+
 static target_ulong h_spa_setup(PowerPCCPU *cpu,
                                 sPAPRMachineState *spapr,
                                 target_ulong opcode,
                                 target_ulong *args)
 {
+    sPAPRCAPIDeviceState *s;
+    PCIDevice *pdev;
     target_ulong p_spa_mem = args[0];
+    target_ulong buid = args[1];
+    target_ulong config_addr = args[2];
 
-    fprintf(stderr, "%s: %#lx\n", __func__, p_spa_mem);
+    fprintf(stderr, "%s: %#lx, buid: %#lx, config_addr: %#lx\n", __func__, p_spa_mem, buid, config_addr);
+
+    pdev = spapr_pci_find_dev(spapr, buid, config_addr);
+    if (!pdev)
+        return H_PARAMETER;
+
+    s = SPAPR_CAPI_DEVICE(pdev);
+    s->p_spa_mem = p_spa_mem;
+
     return H_SUCCESS;
 }
 
@@ -107,6 +132,7 @@ static void *memcopy_status_t(void *arg)
     sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
     struct timeval test_timeout, temp;
     struct memcpy_work_element first_we;
+    struct process_element pe;
     uint32_t pid = pci_default_read_config(PCI_DEVICE(s), 0xfe0, 4);
     hwaddr wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
 
@@ -116,8 +142,11 @@ static void *memcopy_status_t(void *arg)
     gettimeofday(&test_timeout, NULL);
     timeradd(&test_timeout, &temp, &test_timeout);
 
-    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx pidr: %d\n",
-            __func__, s->pasid, s->wed, wed, pid);
+    /* get context.id */
+    cpu_physical_memory_read(s->p_spa_mem + (s->pasid * sizeof(pe)), &pe, sizeof(pe));
+
+    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx pidr: %d, context.id: %#x, p_spa_mem: %#lx\n",
+            __func__, s->pasid, s->wed, wed, pid, be32_to_cpu(pe.pid), s->p_spa_mem);
 
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
@@ -126,7 +155,7 @@ static void *memcopy_status_t(void *arg)
             break;
         }
 
-        /* wait the validation of the command */
+        /* wait for the validation of the command */
         cpu_physical_memory_read(wed, &first_we, sizeof(first_we));
 
         if (first_we.cmd == MEMCPY_WE_CMD_VALID) {

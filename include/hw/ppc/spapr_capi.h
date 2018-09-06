@@ -31,6 +31,7 @@ typedef struct sPAPRCAPIDeviceState {
 
     MemoryRegion mmio;
     uint64_t wed;
+    uint64_t p_spa_mem;
     uint64_t status;
     int pasid;
 

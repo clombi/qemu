@@ -20,6 +20,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
+#include "hw/ppc/spapr.h"
 #include "hw/ppc/spapr_capi.h"
 #include "cpu.h"
 #include "mmu-radix64.h"
@@ -90,6 +91,17 @@ struct memcpy_work_element {
     uint64_t dst;
 } __packed;
 
+static target_ulong h_spa_setup(PowerPCCPU *cpu,
+                                sPAPRMachineState *spapr,
+                                target_ulong opcode,
+                                target_ulong *args)
+{
+    target_ulong p_spa_mem = args[0];
+
+    fprintf(stderr, "%s: %#lx\n", __func__, p_spa_mem);
+    return H_SUCCESS;
+}
+
 static void *memcopy_status_t(void *arg)
 {
     sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
@@ -116,8 +128,6 @@ static void *memcopy_status_t(void *arg)
 
         /* wait the validation of the command */
         cpu_physical_memory_read(wed, &first_we, sizeof(first_we));
-        fprintf(stderr, "%s - addr: %#lx, cmd: %d\n", __func__, wed,
-                first_we.cmd);
 
         if (first_we.cmd == MEMCPY_WE_CMD_VALID) {
             hwaddr src = ppc_radix64_get_phys_page_virtual(first_we.src, pid);
@@ -171,23 +181,16 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
         (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
     {    
-         /* someone is writting the work element descriptor (wed) address$
-          * in AFU per Process PSA area.$
-          * So we can access to the first command and so the status of this$
-          * one
-          *
-          * WED Register (x0000)
+         /* WED Register (x0000)
           *     [63:12] Base EA of the start of the work element queue.
-          *$
           */
          switch (addr & 0xFF) {
          case 0x0:
-             s->wed_l = val & ~0xfff;
+             s->wed = val & ~0xfff;
              s->pasid = (addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH;
          break;
          case 0x4:
-             s->wed_h = val;
-             s->wed = (s->wed_h << 32) + s->wed_l;
+             s->wed += (val << 32);
              s->status = 0x3; /* Process Element has been terminated/Removed */
 
              /* start a thread to update the memcopy status */
@@ -325,7 +328,7 @@ static uint32_t spapr_capi_read_config(PCIDevice *pdev, uint32_t addr, int l)
             uint16_t templ_mmio_pp_offset_lo = 0x200;
             uint32_t templ_mmio_pp_offset_hi = 0x0;
 
-            if (offset == OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
+            if (offset == OCXL_DVSEC_TEMPL_MMIO_PP) {
                 val =
                     templ_mmio_pp +
                     (templ_mmio_pp_offset_lo << 16);
@@ -444,6 +447,9 @@ static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->desc = "sPAPR CAPI device";
     dc->user_creatable = true;
+
+    /* hcall-spa */
+    spapr_register_hypercall(KVMPPC_H_SPA_SETUP, h_spa_setup);
 }
 
 static const TypeInfo spapr_capi_device_info = {

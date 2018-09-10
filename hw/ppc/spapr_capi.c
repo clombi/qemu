@@ -80,6 +80,14 @@
 #define OCXL_AFU_PER_PPROCESS_PSA_LENGTH      0x10000
 
 #define MEMCPY_WE_CMD_VALID	(0x1 << 0)
+#define MEMCPY_WE_CMD_WRAP	(0x1 << 1)
+#define MEMCPY_WE_CMD_COPY		0
+#define MEMCPY_WE_CMD_IRQ		1
+#define MEMCPY_WE_CMD_STOP		2
+#define MEMCPY_WE_CMD_WAKE_HOST_THREAD	3
+#define MEMCPY_WE_CMD_INCREMENT		4
+#define MEMCPY_WE_CMD_ATOMIC		5
+#define MEMCPY_WE_CMD_TRANSLATE_TOUCH	6
 
 struct memcpy_work_element {
     volatile uint8_t cmd; /* valid, wrap, cmd */
@@ -131,10 +139,13 @@ static void *memcopy_status_t(void *arg)
 {
     sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
     struct timeval test_timeout, temp;
-    struct memcpy_work_element first_we;
+    struct memcpy_work_element mwe;
     struct process_element pe;
-    uint32_t pid = pci_default_read_config(PCI_DEVICE(s), 0xfe0, 4);
-    hwaddr wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
+    uint64_t afu_irq_handle;
+    uint32_t pid;
+    uint8_t cmd;
+    hwaddr wed, src, dst, afu_irq;
+    char *buf;
 
     temp.tv_sec = 5;
     temp.tv_usec = 0;
@@ -144,40 +155,77 @@ static void *memcopy_status_t(void *arg)
 
     /* get context.id */
     cpu_physical_memory_read(s->p_spa_mem + (s->pasid * sizeof(pe)), &pe, sizeof(pe));
+    pid = be32_to_cpu(pe.pid);
 
-    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx pidr: %d, context.id: %#x, p_spa_mem: %#lx\n",
-            __func__, s->pasid, s->wed, wed, pid, be32_to_cpu(pe.pid), s->p_spa_mem);
+    /* get physical address */
+    wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
+
+    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx, context.id: %#x, p_spa_mem: %#lx\n",
+                    __func__, s->pasid, s->wed, wed, pid, s->p_spa_mem);
 
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
-            fprintf(stderr, "%s - timeout polling for completion\n",
-                    __func__);
+            if (!s->status)
+                fprintf(stderr, "%s - timeout polling for completion\n",
+                        __func__);
             break;
         }
 
-        /* wait for the validation of the command */
-        cpu_physical_memory_read(wed, &first_we, sizeof(first_we));
+        /* retrieve the command */
+        cpu_physical_memory_read(wed, &mwe, sizeof(mwe));
 
-        if (first_we.cmd == MEMCPY_WE_CMD_VALID) {
-            hwaddr src = ppc_radix64_get_phys_page_virtual(first_we.src, pid);
-            hwaddr dst = ppc_radix64_get_phys_page_virtual(first_we.dst, pid);
-            char *buf;
+        /* wait for the validation of the command
+         * [0] - Valid
+         * [1] - Wrap
+         * [7:2] - Cmd[5:0]
+         */
+        if ((mwe.cmd & 0x01) == MEMCPY_WE_CMD_VALID) {
+            cmd = (mwe.cmd & 0xFC) >> 2;
 
-            /* copy data from src to dst */
-            fprintf(stderr, "%s - copy %d bytes from "
-                    "%#lx (EA %#lx) to %#lx (EA %#lx)\n",
-                    __func__, first_we.length, first_we.src, src,
-                    first_we.dst, dst);
-            buf = g_malloc(first_we.length);
-            cpu_physical_memory_read(src, buf, first_we.length);
-            cpu_physical_memory_write(dst, buf, first_we.length);
-            g_free(buf);
+            switch (cmd) {
+            case MEMCPY_WE_CMD_COPY:
+                src = ppc_radix64_get_phys_page_virtual(mwe.src, pid);
+                dst = ppc_radix64_get_phys_page_virtual(mwe.dst, pid);
 
-            stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
-            s->status = 0; /* The call succeeded */
-            break;
+                /* copy data from src to dst */
+                fprintf(stderr, "%s - copy %d bytes from "
+                        "%#lx (PA %#lx) to %#lx (PA %#lx)\n",
+                        __func__, mwe.length, mwe.src, src, mwe.dst, dst);
+                buf = g_malloc(mwe.length);
+                cpu_physical_memory_read(src, buf, mwe.length);
+                cpu_physical_memory_write(dst, buf, mwe.length);
+                g_free(buf);
+
+                stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
+                s->status = 0x3; /* Process Element has been terminated/Removed */
+                break;
+
+            case MEMCPY_WE_CMD_IRQ:
+                /* raise an interrupt */
+                afu_irq_handle = le64toh(mwe.src);
+                afu_irq = ppc_radix64_get_phys_page_virtual(afu_irq_handle, pid);
+                fprintf(stderr, "%s - irq EA = %#lx (irq GPA: %#lx)\n",
+                                __func__, afu_irq_handle, afu_irq);
+                cpu_physical_memory_write(afu_irq, &afu_irq_handle, sizeof(uint64_t));
+
+                s->status = 0x3; /* Process Element has been terminated/Removed */
+                break;
+            default:
+                /* no more command */
+                goto out;
+            }
+
+            /* next command */
+            s->wed += sizeof(struct memcpy_work_element);
+            wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
+        } else {
+            if (s->status) {
+                /* no more command */
+                goto out;
+            }
         }
     }
+out:
     return NULL;
 }
 
@@ -220,7 +268,8 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
          break;
          case 0x4:
              s->wed += (val << 32);
-             s->status = 0x3; /* Process Element has been terminated/Removed */
+             s->status = 0x0; /* Process Valid - Process has been added
+                               * to AFU and not Terminated/Removed */
 
              /* start a thread to update the memcopy status */
              pthread_create(&thr, NULL, memcopy_status_t, s);

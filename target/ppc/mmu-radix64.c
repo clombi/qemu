@@ -333,7 +333,9 @@ hwaddr ppc_radix64_get_phys_page_virtual(target_ulong eaddr, uint64_t pid)
                                 prtbe0 & PRTBE_R_RPDB, prtbe0 & PRTBE_R_RPDS,
                                 &raddr, &page_size, &fault_cause, &pte_addr);
     if (!pte) {
+#if 0
         fprintf(stderr, "%s: no PTE. Fault = %x\n", __func__, fault_cause);
+#endif
         return -1;
     }
 

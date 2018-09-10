@@ -62,6 +62,13 @@
 #define   OCXL_DVSEC_VENDOR_TLX_VERS            0x10
 #define   OCXL_DVSEC_VENDOR_DLX_VERS            0x20
 
+/*BAR0 + x200_0000 : BAR0 + x3FF_FFFF
+ *AFU per Process PSA (64kB per Process, max 512 processes)
+ */
+#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_START  0x2000000
+#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_END    0x3FFFFFF
+#define OCXL_AFU_PER_PPROCESS_PSA_LENGTH      0x10000
+
 #define OCXL_DVSEC_TEMPL_VERSION         0x0
 #define OCXL_DVSEC_TEMPL_NAME            0x4
 #define OCXL_DVSEC_TEMPL_AFU_VERSION     0x1C
@@ -72,13 +79,6 @@
 #define OCXL_DVSEC_TEMPL_MEM_SZ          0x3C
 #define OCXL_DVSEC_TEMPL_WWID            0x40
 
-/*BAR0 + x200_0000 : BAR0 + x3FF_FFFF
- *AFU per Process PSA (64kB per Process, max 512 processes)
- */
-#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_START  0x2000000
-#define OCXL_AFU_PER_PPROCESS_PSA_ADDR_END    0x3FFFFFF
-#define OCXL_AFU_PER_PPROCESS_PSA_LENGTH      0x10000
-
 #define MEMCPY_WE_CMD_VALID	(0x1 << 0)
 #define MEMCPY_WE_CMD_WRAP	(0x1 << 1)
 #define MEMCPY_WE_CMD_COPY		0
@@ -88,6 +88,9 @@
 #define MEMCPY_WE_CMD_INCREMENT		4
 #define MEMCPY_WE_CMD_ATOMIC		5
 #define MEMCPY_WE_CMD_TRANSLATE_TOUCH	6
+
+#define SPA_XSL_TF              (1ull << (63-3))  /* Translation fault */
+#define SPA_XSL_S               (1ull << (63-38)) /* Store operation */
 
 struct memcpy_work_element {
     volatile uint8_t cmd; /* valid, wrap, cmd */
@@ -160,6 +163,33 @@ static target_ulong h_spa_setup(PowerPCCPU *cpu,
     return H_SUCCESS;
 }
 
+static target_ulong h_read_xsl_regs(PowerPCCPU *cpu,
+                                    sPAPRMachineState *spapr,
+                                    target_ulong opcode,
+                                    target_ulong *args)
+{
+    sPAPRCAPIDeviceState *s;
+    PCIDevice *pdev;
+    target_ulong buid = args[0];
+    target_ulong config_addr = args[1];
+
+#if 0
+    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx\n", __func__,
+            buid, config_addr);
+#endif
+
+    pdev = spapr_pci_find_dev(spapr, buid, config_addr);
+    if (!pdev)
+        return H_PARAMETER;
+
+    s = SPAPR_CAPI_DEVICE(pdev);
+
+    args[0] = s->fault_cause | SPA_XSL_TF;
+    args[1] = s->fault_address;
+
+    return H_SUCCESS;
+}
+
 static void *memcopy_status_t(void *arg)
 {
     sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
@@ -212,6 +242,16 @@ static void *memcopy_status_t(void *arg)
             case MEMCPY_WE_CMD_COPY:
                 src = ppc_radix64_get_phys_page_virtual(mwe.src, pid);
                 dst = ppc_radix64_get_phys_page_virtual(mwe.dst, pid);
+
+                /* TODO: we should have read/write functions that automatically
+                 *       trigger page faults.
+                 */
+                if (dst == -1) {
+                    s->fault_cause = SPA_XSL_TF | SPA_XSL_S;
+                    s->fault_address = mwe.dst;
+                    qemu_irq_pulse(spapr_qirq(spapr, 0x1204));
+                    continue;
+                }
 
                 /* copy data from src to dst */
                 fprintf(stderr, "%s - copy %d bytes from "
@@ -286,26 +326,26 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
         (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
     {    
-         /* WED Register (x0000)
-          *     [63:12] Base EA of the start of the work element queue.
-          */
-         switch (addr & 0xFF) {
-         case 0x0:
-             s->wed = val & ~0xfff;
-             s->pasid = (addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH;
-         break;
-         case 0x4:
-             s->wed += (val << 32);
-             s->status = 0x0; /* Process Valid - Process has been added
-                               * to AFU and not Terminated/Removed */
+        /* WED Register (x0000)
+         *     [63:12] Base EA of the start of the work element queue.
+         */
+        switch (addr & 0xFF) {
+        case 0x0:
+            s->wed = val & ~0xfff;
+            s->pasid = (addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH;
+        break;
+        case 0x4:
+            s->wed += (val << 32);
+            s->status = 0x0; /* Process Valid - Process has been added
+                              * to AFU and not Terminated/Removed */
 
-             /* start a thread to update the memcopy status */
-             pthread_create(&thr, NULL, memcopy_status_t, s);
-         break;
-         case 0x28:
-         case 0x2C:
-         break;
-         }
+            /* start a thread to update the memcopy status */
+            pthread_create(&thr, NULL, memcopy_status_t, s);
+        break;
+        case 0x28:
+        case 0x2C:
+        break;
+        }
     }
 }
 
@@ -556,6 +596,7 @@ static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
 
     /* hcall */
     spapr_register_hypercall(KVMPPC_H_SPA_SETUP, h_spa_setup);
+    spapr_register_hypercall(KVMPPC_H_READ_XSL_REGS, h_read_xsl_regs);
     spapr_register_hypercall(KVMPPC_H_IRQ_INFO, h_irq_info);
 }
 

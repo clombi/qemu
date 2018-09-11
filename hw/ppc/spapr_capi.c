@@ -112,6 +112,30 @@ struct process_element {
     __be32 software_state;
 };
 
+static target_ulong h_irq_info(PowerPCCPU *cpu,
+                               sPAPRMachineState *spapr,
+                               target_ulong opcode,
+                               target_ulong *args)
+{
+    sPAPRCAPIDeviceState *s;
+    PCIDevice *pdev;
+    target_ulong buid = args[0];
+    target_ulong config_addr = args[1];
+    target_ulong hwirq = args[2];
+
+    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (hwirq: %#lx)\n",
+                    __func__, buid, config_addr, hwirq);
+
+    pdev = spapr_pci_find_dev(spapr, buid, config_addr);
+    if (!pdev)
+        return H_PARAMETER;
+
+    s = SPAPR_CAPI_DEVICE(pdev);
+    s->afu_hwirq = hwirq;
+
+    return H_SUCCESS;
+}
+
 static target_ulong h_spa_setup(PowerPCCPU *cpu,
                                 sPAPRMachineState *spapr,
                                 target_ulong opcode,
@@ -119,11 +143,12 @@ static target_ulong h_spa_setup(PowerPCCPU *cpu,
 {
     sPAPRCAPIDeviceState *s;
     PCIDevice *pdev;
-    target_ulong p_spa_mem = args[0];
-    target_ulong buid = args[1];
-    target_ulong config_addr = args[2];
+    target_ulong buid = args[0];
+    target_ulong config_addr = args[1];
+    target_ulong p_spa_mem = args[2];
 
-    fprintf(stderr, "%s: %#lx, buid: %#lx, config_addr: %#lx\n", __func__, p_spa_mem, buid, config_addr);
+    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (p_spa_mem: %#lx)\n",
+                    __func__, buid, config_addr, p_spa_mem);
 
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
@@ -137,6 +162,7 @@ static target_ulong h_spa_setup(PowerPCCPU *cpu,
 
 static void *memcopy_status_t(void *arg)
 {
+    sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
     sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
     struct timeval test_timeout, temp;
     struct memcpy_work_element mwe;
@@ -144,7 +170,7 @@ static void *memcopy_status_t(void *arg)
     uint64_t afu_irq_handle;
     uint32_t pid;
     uint8_t cmd;
-    hwaddr wed, src, dst, afu_irq;
+    hwaddr wed, src, dst;
     char *buf;
 
     temp.tv_sec = 5;
@@ -203,11 +229,13 @@ static void *memcopy_status_t(void *arg)
             case MEMCPY_WE_CMD_IRQ:
                 /* raise an interrupt */
                 afu_irq_handle = le64toh(mwe.src);
-                afu_irq = ppc_radix64_get_phys_page_virtual(afu_irq_handle, pid);
-                fprintf(stderr, "%s - irq EA = %#lx (irq GPA: %#lx)\n",
-                                __func__, afu_irq_handle, afu_irq);
-                cpu_physical_memory_write(afu_irq, &afu_irq_handle, sizeof(uint64_t));
 
+                fprintf(stderr, "%s - irq EA = %#lx, hwirq: %d\n",
+                                __func__, afu_irq_handle, s->afu_hwirq);
+
+                qemu_irq_pulse(spapr_qirq(spapr, s->afu_hwirq));
+
+                stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
                 s->status = 0x3; /* Process Element has been terminated/Removed */
                 break;
             default:
@@ -526,8 +554,9 @@ static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
     dc->desc = "sPAPR CAPI device";
     dc->user_creatable = true;
 
-    /* hcall-spa */
+    /* hcall */
     spapr_register_hypercall(KVMPPC_H_SPA_SETUP, h_spa_setup);
+    spapr_register_hypercall(KVMPPC_H_IRQ_INFO, h_irq_info);
 }
 
 static const TypeInfo spapr_capi_device_info = {

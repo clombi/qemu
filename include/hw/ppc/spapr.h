@@ -457,7 +457,8 @@ struct sPAPRMachineState {
 /* Client Architecture support */
 #define KVMPPC_H_CAS            (KVMPPC_HCALL_BASE + 0x2)
 #define KVMPPC_H_SPA_SETUP      (KVMPPC_HCALL_BASE + 0x3)
-#define KVMPPC_HCALL_MAX        KVMPPC_H_SPA_SETUP
+#define KVMPPC_H_IRQ_INFO       (KVMPPC_HCALL_BASE + 0x4)
+#define KVMPPC_HCALL_MAX        KVMPPC_H_IRQ_INFO
 
 typedef struct sPAPRDeviceTreeUpdateHeader {
     uint32_t version_id;

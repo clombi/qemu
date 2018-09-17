@@ -89,8 +89,8 @@
 #define MEMCPY_WE_CMD_ATOMIC		5
 #define MEMCPY_WE_CMD_TRANSLATE_TOUCH	6
 
-#define SPA_XSL_TF              (1ull << (63-3))  /* Translation fault */
-#define SPA_XSL_S               (1ull << (63-38)) /* Store operation */
+#define SPA_XSL_TF          (1ull << (63-3))  /* Translation fault */
+#define SPA_XSL_S           (1ull << (63-38)) /* Store operation */
 
 struct memcpy_work_element {
     volatile uint8_t cmd; /* valid, wrap, cmd */
@@ -103,17 +103,14 @@ struct memcpy_work_element {
     uint64_t dst;
 } __packed;
 
-struct process_element {
-    __be64 config_state;
-    __be32 reserved1[11];
-    __be32 lpid;
-    __be32 tid;
-    __be32 pid;
-    __be32 reserved2[10];
-    __be64 amr;
-    __be32 reserved3[3];
-    __be32 software_state;
+struct data_t {
+    sPAPRCAPIDeviceState *s;
+    int pasid;
 };
+
+static inline int get_pasid(hwaddr addr) {
+    return ((addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH);
+}
 
 static target_ulong h_irq_info(PowerPCCPU *cpu,
                                sPAPRMachineState *spapr,
@@ -124,22 +121,24 @@ static target_ulong h_irq_info(PowerPCCPU *cpu,
     PCIDevice *pdev;
     target_ulong buid = args[0];
     target_ulong config_addr = args[1];
-    target_ulong hwirq = args[2];
+    target_ulong xsl_hwirq = args[2];
+    target_ulong afu_hwirq = args[3];
 
-    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (hwirq: %#lx)\n",
-                    __func__, buid, config_addr, hwirq);
+    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (xsl_hwirq: %#lx, afu_hwirq: %#lx)\n",
+                    __func__, buid, config_addr, xsl_hwirq, afu_hwirq);
 
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
         return H_PARAMETER;
 
     s = SPAPR_CAPI_DEVICE(pdev);
-    s->afu_hwirq = hwirq;
+    s->xsl_hwirq = xsl_hwirq;
+    s->afu_hwirq = afu_hwirq;
 
     return H_SUCCESS;
 }
 
-static target_ulong h_spa_setup(PowerPCCPU *cpu,
+static target_ulong h_attach_pe(PowerPCCPU *cpu,
                                 sPAPRMachineState *spapr,
                                 target_ulong opcode,
                                 target_ulong *args)
@@ -148,17 +147,22 @@ static target_ulong h_spa_setup(PowerPCCPU *cpu,
     PCIDevice *pdev;
     target_ulong buid = args[0];
     target_ulong config_addr = args[1];
-    target_ulong p_spa_mem = args[2];
+    target_ulong pasid = args[2];
+    target_ulong pidr = args[3];
 
-    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (p_spa_mem: %#lx)\n",
-                    __func__, buid, config_addr, p_spa_mem);
+    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (pasid: %#lx, pidr: %#lx)\n",
+                    __func__, buid, config_addr, pasid, pidr);
 
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
         return H_PARAMETER;
 
     s = SPAPR_CAPI_DEVICE(pdev);
-    s->p_spa_mem = p_spa_mem;
+
+    if (pasid > PASID_MAX)
+        return H_PARAMETER;
+
+    s->mcmd[pasid].pidr = pidr;
 
     return H_SUCCESS;
 }
@@ -173,19 +177,17 @@ static target_ulong h_read_xsl_regs(PowerPCCPU *cpu,
     target_ulong buid = args[0];
     target_ulong config_addr = args[1];
 
-#if 0
-    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx\n", __func__,
-            buid, config_addr);
-#endif
-
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
         return H_PARAMETER;
 
     s = SPAPR_CAPI_DEVICE(pdev);
+    args[0] = s->dsisr;
+    args[1] = s->dar;
+    args[2] = s->pe_handle;
 
-    args[0] = s->fault_cause | SPA_XSL_TF;
-    args[1] = s->fault_address;
+    fprintf(stderr, "%s: dsisr: %#lx, dar: %#lx, pe_handle: %#lx\n",
+                    __func__, args[0], args[1], args[2]);
 
     return H_SUCCESS;
 }
@@ -193,35 +195,40 @@ static target_ulong h_read_xsl_regs(PowerPCCPU *cpu,
 static void *memcopy_status_t(void *arg)
 {
     sPAPRMachineState *spapr = SPAPR_MACHINE(qdev_get_machine());
-    sPAPRCAPIDeviceState *s = (sPAPRCAPIDeviceState *)arg;
+    struct data_t *data = (struct data_t *)arg;
+    struct sPAPRCAPIDeviceState *s = data->s;
     struct timeval test_timeout, temp;
     struct memcpy_work_element mwe;
-    struct process_element pe;
+    struct memcopy_cmd *mcmd;
     uint64_t afu_irq_handle;
-    uint32_t pid;
     uint8_t cmd;
     hwaddr wed, src, dst;
     char *buf;
+    int pasid;
+    uintptr_t rc = 0;
 
+    pasid = data->pasid;
+    if (pasid > PASID_MAX) {
+        rc = -EINVAL;
+        goto out;
+    }
+
+    /* start timeout */
     temp.tv_sec = 5;
     temp.tv_usec = 0;
-
     gettimeofday(&test_timeout, NULL);
     timeradd(&test_timeout, &temp, &test_timeout);
 
-    /* get context.id */
-    cpu_physical_memory_read(s->p_spa_mem + (s->pasid * sizeof(pe)), &pe, sizeof(pe));
-    pid = be32_to_cpu(pe.pid);
-
     /* get physical address */
-    wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
+    mcmd = &s->mcmd[pasid];
+    wed = ppc_radix64_eaddr_to_hwaddr(mcmd->wed, mcmd->pidr);
 
-    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx, context.id: %#x, p_spa_mem: %#lx\n",
-                    __func__, s->pasid, s->wed, wed, pid, s->p_spa_mem);
+    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx, context.id: %#x\n",
+                    __func__, pasid, mcmd->wed, wed, mcmd->pidr);
 
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
-            if (!s->status)
+            if (!mcmd->status)
                 fprintf(stderr, "%s - timeout polling for completion\n",
                         __func__);
             break;
@@ -240,18 +247,42 @@ static void *memcopy_status_t(void *arg)
 
             switch (cmd) {
             case MEMCPY_WE_CMD_COPY:
-                src = ppc_radix64_get_phys_page_virtual(mwe.src, pid);
-                dst = ppc_radix64_get_phys_page_virtual(mwe.dst, pid);
+                src = ppc_radix64_eaddr_to_hwaddr(mwe.src, mcmd->pidr);
+                dst = ppc_radix64_eaddr_to_hwaddr(mwe.dst, mcmd->pidr);
 
                 /* TODO: we should have read/write functions that automatically
                  *       trigger page faults.
                  */
+                /* only one page fault handled. Other threads have to wait */
                 if (dst == -1) {
-                    s->fault_cause = SPA_XSL_TF | SPA_XSL_S;
-                    s->fault_address = mwe.dst;
-                    qemu_irq_pulse(spapr_qirq(spapr, 0x1204));
+                    if (!s->dsisr) {
+                        /* First solution: Guest, through a hcall requests
+                         * fault information
+                         */
+                        s->dsisr = SPA_XSL_TF | SPA_XSL_S;
+                        s->dar = mwe.dst;
+                        s->pe_handle = pasid;
+
+                        /* Second solution: As we have for native environment, we could use
+                         *                  allocated buffer
+                                stb_phys(&address_space_memory, disr, (uint32_t)(SPA_XSL_TF | SPA_XSL_S));
+                                stb_phys(&address_space_memory, dar, mwe.dst);
+                                stb_phys(&address_space_memory, pe_handle, pasid);
+                         */
+                
+                        qemu_irq_pulse(spapr_qirq(spapr, s->xsl_hwirq));
+                        fprintf(stderr, "%s - fault at %#lx\n", __func__, mwe.dst);
+                    }
+                    /* wait for the page fault handled */
                     continue;
                 }
+
+                /* the page fault has been handled. Let's the other
+                 * threads playing this that
+                 */
+                s->dsisr = 0;
+                s->dar = 0;
+                s->pe_handle = 0;
 
                 /* copy data from src to dst */
                 fprintf(stderr, "%s - copy %d bytes from "
@@ -263,7 +294,7 @@ static void *memcopy_status_t(void *arg)
                 g_free(buf);
 
                 stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
-                s->status = 0x3; /* Process Element has been terminated/Removed */
+                mcmd->status = 0x3; /* Process Element has been terminated/Removed */
                 break;
 
             case MEMCPY_WE_CMD_IRQ:
@@ -276,7 +307,7 @@ static void *memcopy_status_t(void *arg)
                 qemu_irq_pulse(spapr_qirq(spapr, s->afu_hwirq));
 
                 stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
-                s->status = 0x3; /* Process Element has been terminated/Removed */
+                mcmd->status = 0x3; /* Process Element has been terminated/Removed */
                 break;
             default:
                 /* no more command */
@@ -284,32 +315,41 @@ static void *memcopy_status_t(void *arg)
             }
 
             /* next command */
-            s->wed += sizeof(struct memcpy_work_element);
-            wed = ppc_radix64_get_phys_page_virtual(s->wed, pid);
+            mcmd->wed += sizeof(struct memcpy_work_element);
+            wed = ppc_radix64_eaddr_to_hwaddr(mcmd->wed, mcmd->pidr);
         } else {
-            if (s->status) {
+            if (mcmd->status) {
                 /* no more command */
                 goto out;
             }
         }
     }
 out:
-    return NULL;
+    return ((void *)rc);
 }
 
 static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     sPAPRCAPIDeviceState *s = opaque;
+    struct memcopy_cmd *mcmd;
+    int pasid;
 
     fprintf(stderr, "%s - addr: 0x%lx,  size: 0x%x\n",
             __func__, addr, size);
 
-    switch (addr & 0xFF) {
-    case 0x10: /* Process Status Register 64bits */
-        return s->status;
-    break;
-    case 0x14: 
-    break;
+    if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
+        (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
+    {
+        pasid = get_pasid(addr);
+        mcmd = &s->mcmd[pasid];
+
+        switch (addr & 0xFF) {
+        case 0x10: /* Process Status Register 64bits */
+            return mcmd->status;
+        break;
+        case 0x14: 
+        break;
+        }
     }
     return 0;
 }
@@ -318,29 +358,34 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
     sPAPRCAPIDeviceState *s = opaque;
+    struct data_t data;
     pthread_t thr;
+    int pasid;
 
     fprintf(stderr, "%s - addr: 0x%lx, val: 0x%lx\n",
             __func__, addr, val);
 
     if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
         (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
-    {    
+    {
+        pasid = get_pasid(addr);
+
         /* WED Register (x0000)
          *     [63:12] Base EA of the start of the work element queue.
          */
         switch (addr & 0xFF) {
         case 0x0:
-            s->wed = val & ~0xfff;
-            s->pasid = (addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH;
+            s->mcmd[pasid].wed = val & ~0xfff;
         break;
         case 0x4:
-            s->wed += (val << 32);
-            s->status = 0x0; /* Process Valid - Process has been added
-                              * to AFU and not Terminated/Removed */
+            s->mcmd[pasid].wed += (val << 32);
+            s->mcmd[pasid].status = 0x0; /* Process Valid - Process has been added
+                                          * to AFU and not Terminated/Removed */
 
             /* start a thread to update the memcopy status */
-            pthread_create(&thr, NULL, memcopy_status_t, s);
+            data.s = s;
+            data.pasid = pasid;
+            pthread_create(&thr, NULL, memcopy_status_t, &data);
         break;
         case 0x28:
         case 0x2C:
@@ -359,8 +404,8 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
         .write = capi_mmio_write,
         .endianness = DEVICE_LITTLE_ENDIAN,
         .impl = {
-            .min_access_size = 4,
-            .max_access_size = 4,
+            .min_access_size = 8,
+            .max_access_size = 8,
         }
     };
 
@@ -595,9 +640,9 @@ static void spapr_capi_device_class_init(ObjectClass *oc, void *data)
     dc->user_creatable = true;
 
     /* hcall */
-    spapr_register_hypercall(KVMPPC_H_SPA_SETUP, h_spa_setup);
-    spapr_register_hypercall(KVMPPC_H_READ_XSL_REGS, h_read_xsl_regs);
     spapr_register_hypercall(KVMPPC_H_IRQ_INFO, h_irq_info);
+    spapr_register_hypercall(KVMPPC_H_ATTACH_PE, h_attach_pe);
+    spapr_register_hypercall(KVMPPC_H_READ_XSL_REGS, h_read_xsl_regs);
 }
 
 static const TypeInfo spapr_capi_device_info = {

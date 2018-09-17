@@ -26,18 +26,26 @@
 #define SPAPR_CAPI_DEVICE(obj) \
     OBJECT_CHECK(sPAPRCAPIDeviceState, (obj), TYPE_SPAPR_CAPI_DEVICE)
 
+#define PASID_BITS  15
+#define PASID_MAX   ((1 << PASID_BITS) - 1)
+
+struct memcopy_cmd {
+    uint64_t wed;
+    int pidr;
+    uint64_t status;
+};
+
 typedef struct sPAPRCAPIDeviceState {
     PCIDevice parent;
-
     MemoryRegion mmio;
-    uint64_t wed;
-    uint64_t p_spa_mem;
-    uint64_t status;
-    int pasid;
+    
+    struct memcopy_cmd mcmd[PASID_MAX];
+    int xsl_hwirq;
     int afu_hwirq;
 
-    uint64_t fault_address;
-    uint64_t fault_cause;
+    uint64_t dsisr;
+    uint64_t dar;
+    uint64_t pe_handle;
 
     uint16_t dvsec_afu_info_id;
 } sPAPRCAPIDeviceState;

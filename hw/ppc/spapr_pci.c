@@ -1355,10 +1355,13 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
 
     if (sphb->capi_mode) {
         uint32_t irq;
+        int i;
+        char name[20];
         Error *local_err = NULL;
         sPAPRMachineState *spapr =
                 (sPAPRMachineState *) object_dynamic_cast(qdev_get_machine(),
                                                           TYPE_SPAPR_MACHINE);
+
         uint64_t disr = 0x00060302001d0000;
         uint64_t dar = 0x00060302001d0008;
         uint64_t tfc = 0x00060302001d0010;
@@ -1391,17 +1394,20 @@ static void spapr_populate_pci_child_dt(PCIDevice *dev, void *fdt, int offset,
          */
         _FDT(fdt_setprop(fdt, offset, "ibm,xsl-mmio", reg, sizeof(reg)));
 
-	/* Pass the afu hw irq number */
-        irq = spapr_irq_findone(spapr, &local_err);
-        if (local_err) {
-            irq = 0x0;
-        } else {
-            spapr_irq_claim(spapr, irq, false, &local_err);
+        /* Pass the afu hw irqs number */
+        for (i = 0; i < 5; i++) {
+            irq = spapr_irq_findone(spapr, &local_err);
             if (local_err) {
                 irq = 0x0;
+            } else {
+                spapr_irq_claim(spapr, irq, false, &local_err);
+                if (local_err) {
+                    irq = 0x0;
+                }
             }
+            sprintf(name, "ibm,afu-irq-%i", i);
+            _FDT(fdt_setprop_cell(fdt, offset, name, irq));
         }
-        _FDT(fdt_setprop_cell(fdt, offset, "ibm,afu-irq", irq));
     }
 }
 
@@ -1776,7 +1782,7 @@ static void spapr_phb_realize(DeviceState *dev, Error **errp)
     QLIST_INSERT_HEAD(&spapr->phbs, sphb, list);
 
     if (!sphb->capi_mode) {
-	    /* Initialize the LSI table */
+            /* Initialize the LSI table */
             for (i = 0; i < PCI_NUM_PINS; i++) {
                 uint32_t irq;
                 Error *local_err = NULL;

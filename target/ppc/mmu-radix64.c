@@ -295,7 +295,7 @@ hwaddr ppc_radix64_get_phys_page_debug(PowerPCCPU *cpu, target_ulong eaddr)
     return raddr & TARGET_PAGE_MASK;
 }
 
-hwaddr ppc_radix64_get_phys_page_virtual(target_ulong eaddr, uint64_t pid)
+hwaddr ppc_radix64_eaddr_to_hwaddr(target_ulong eaddr, uint64_t pid)
 {
     PowerPCCPU *cpu = POWERPC_CPU(first_cpu);
     CPUState *cs = CPU(cpu);

@@ -409,7 +409,10 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
             pthread_create(&thr, NULL, memcopy_status_t, data);
         break;
         case 0x28:
+            s->mcmd[pasid].err_irq_ea = val & ~0xfff;
+        break;
         case 0x2C:
+            s->mcmd[pasid].err_irq_ea += (val << 32);
         break;
         }
     }

@@ -29,10 +29,13 @@
 #define PASID_BITS  15
 #define PASID_MAX   ((1 << PASID_BITS) - 1)
 
+#define MAX_AFU_IRQ 2  /* temporarly solution */
+
 struct memcopy_cmd {
     uint64_t wed;
     int pidr;
     uint64_t status;
+    uint64_t err_irq_ea;
 };
 
 typedef struct sPAPRCAPIDeviceState {
@@ -41,7 +44,7 @@ typedef struct sPAPRCAPIDeviceState {
     
     struct memcopy_cmd mcmd[PASID_MAX];
     int xsl_hwirq;
-    int afu_hwirq;
+    int afu_hwirq[MAX_AFU_IRQ];  /* temporarly solution */
 
     uint64_t dsisr;
     uint64_t dar;

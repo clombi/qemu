@@ -79,6 +79,9 @@
 #define OCXL_DVSEC_TEMPL_MEM_SZ          0x3C
 #define OCXL_DVSEC_TEMPL_WWID            0x40
 
+#define TEMPL_LEN               0x58
+uint8_t *afu_info_id;
+
 #define MEMCPY_WE_CMD_VALID	(0x1 << 0)
 #define MEMCPY_WE_CMD_WRAP	(0x1 << 1)
 #define MEMCPY_WE_CMD_COPY		0
@@ -91,6 +94,15 @@
 
 #define SPA_XSL_TF          (1ull << (63-3))  /* Translation fault */
 #define SPA_XSL_S           (1ull << (63-38)) /* Store operation */
+
+#define DEBUG
+#ifdef DEBUG
+    #define pr_debug(...) fprintf(stderr, __VA_ARGS__)
+#else
+    #define pr_debug(...) do { } while (0)
+#endif
+
+#define pr_log(...) fprintf(stderr, __VA_ARGS__)
 
 struct memcpy_work_element {
     volatile uint8_t cmd; /* valid, wrap, cmd */
@@ -108,6 +120,9 @@ struct data_t {
     int pasid;
 };
 
+/* temporarly solution */
+int irq_index = 0;
+
 static inline int get_pasid(hwaddr addr) {
     return ((addr - OCXL_AFU_PER_PPROCESS_PSA_ADDR_START)/OCXL_AFU_PER_PPROCESS_PSA_LENGTH);
 }
@@ -121,19 +136,21 @@ static target_ulong h_irq_info(PowerPCCPU *cpu,
     PCIDevice *pdev;
     target_ulong buid = args[0];
     target_ulong config_addr = args[1];
-    target_ulong xsl_hwirq = args[2];
-    target_ulong afu_hwirq = args[3];
+    target_ulong afu_hwirq = args[2];
 
-    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (xsl_hwirq: %#lx, afu_hwirq: %#lx)\n",
-                    __func__, buid, config_addr, xsl_hwirq, afu_hwirq);
+    pr_debug("%s: buid: %#lx, config_addr: %#lx (afu_hwirq: "
+             "%#lx - index: %d)\n",
+             __func__, buid, config_addr, afu_hwirq, irq_index);
 
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
         return H_PARAMETER;
 
     s = SPAPR_CAPI_DEVICE(pdev);
-    s->xsl_hwirq = xsl_hwirq;
-    s->afu_hwirq = afu_hwirq;
+
+    s->afu_hwirq[irq_index++] = afu_hwirq;
+    if (irq_index == MAX_AFU_IRQ)
+        irq_index = 0;
 
     return H_SUCCESS;
 }
@@ -149,9 +166,11 @@ static target_ulong h_attach_pe(PowerPCCPU *cpu,
     target_ulong config_addr = args[1];
     target_ulong pasid = args[2];
     target_ulong pidr = args[3];
+    target_ulong xsl_hwirq = args[4];
 
-    fprintf(stderr, "%s: buid: %#lx, config_addr: %#lx (pasid: %#lx, pidr: %#lx)\n",
-                    __func__, buid, config_addr, pasid, pidr);
+    pr_debug("%s: buid: %#lx, config_addr: %#lx (pasid: %#lx, "
+             "pidr: %#lx), xsl_hwirq: %#lx\n",
+             __func__, buid, config_addr, pasid, pidr, xsl_hwirq);
 
     pdev = spapr_pci_find_dev(spapr, buid, config_addr);
     if (!pdev)
@@ -163,6 +182,7 @@ static target_ulong h_attach_pe(PowerPCCPU *cpu,
         return H_PARAMETER;
 
     s->mcmd[pasid].pidr = pidr;
+    s->xsl_hwirq = xsl_hwirq;
 
     return H_SUCCESS;
 }
@@ -186,8 +206,8 @@ static target_ulong h_read_xsl_regs(PowerPCCPU *cpu,
     args[1] = s->dar;
     args[2] = s->pe_handle;
 
-    fprintf(stderr, "%s: dsisr: %#lx, dar: %#lx, pe_handle: %#lx\n",
-                    __func__, args[0], args[1], args[2]);
+    pr_debug("%s: dsisr: %#lx, dar: %#lx, pe_handle: %#lx\n",
+             __func__, args[0], args[1], args[2]);
 
     return H_SUCCESS;
 }
@@ -200,7 +220,6 @@ static void *memcopy_status_t(void *arg)
     struct timeval test_timeout, temp;
     struct memcpy_work_element mwe;
     struct memcopy_cmd *mcmd;
-    uint64_t afu_irq_handle;
     uint8_t cmd;
     hwaddr wed, src, dst;
     char *buf;
@@ -223,14 +242,14 @@ static void *memcopy_status_t(void *arg)
     mcmd = &s->mcmd[pasid];
     wed = ppc_radix64_eaddr_to_hwaddr(mcmd->wed, mcmd->pidr);
 
-    fprintf(stderr, "%s - (pasid: %d) WED EA: %#lx GPA: %#lx, context.id: %#x\n",
-                    __func__, pasid, mcmd->wed, wed, mcmd->pidr);
+    pr_debug("%s - (pasid: %d) WED EA: %#lx GPA: %#lx, context.id: %#x\n",
+             __func__, pasid, mcmd->wed, wed, mcmd->pidr);
 
     for (;; gettimeofday(&temp, NULL)) {
         if (timercmp(&temp, &test_timeout, >)) {
             if (!mcmd->status)
-                fprintf(stderr, "%s - timeout polling for completion\n",
-                        __func__);
+                pr_log("%s - (pasid: %d) timeout polling for completion\n",
+                       __func__, pasid);
             break;
         }
 
@@ -271,7 +290,8 @@ static void *memcopy_status_t(void *arg)
                          */
                 
                         qemu_irq_pulse(spapr_qirq(spapr, s->xsl_hwirq));
-                        fprintf(stderr, "%s - fault at %#lx\n", __func__, mwe.dst);
+                        pr_debug("%s - MEMCPY_WE_CMD_COPY - fault at %#lx (xsl_hwirq: %d)\n",
+                                 __func__, mwe.dst, s->xsl_hwirq);
                     }
                     /* wait for the page fault handled */
                     continue;
@@ -285,8 +305,8 @@ static void *memcopy_status_t(void *arg)
                 s->pe_handle = 0;
 
                 /* copy data from src to dst */
-                fprintf(stderr, "%s - copy %d bytes from "
-                        "%#lx (PA %#lx) to %#lx (PA %#lx)\n",
+                pr_debug("%s - MEMCPY_WE_CMD_COPY - copy %d bytes from "
+                         "%#lx (PA %#lx) to %#lx (PA %#lx)\n",
                         __func__, mwe.length, mwe.src, src, mwe.dst, dst);
                 buf = g_malloc(mwe.length);
                 cpu_physical_memory_read(src, buf, mwe.length);
@@ -295,16 +315,17 @@ static void *memcopy_status_t(void *arg)
 
                 stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
                 mcmd->status = 0x3; /* Process Element has been terminated/Removed */
+                irq_index = 0;
                 break;
 
             case MEMCPY_WE_CMD_IRQ:
                 /* raise an interrupt */
-                afu_irq_handle = le64toh(mwe.src);
+                /* afu_irq_handle = le64toh(mwe.src);*/
 
-                fprintf(stderr, "%s - irq EA = %#lx, hwirq: %d\n",
-                                __func__, afu_irq_handle, s->afu_hwirq);
+                pr_debug("%s - MEMCPY_WE_CMD_IRQ - irq hwirq: %d\n",
+                         __func__, s->afu_hwirq[0]);
 
-                qemu_irq_pulse(spapr_qirq(spapr, s->afu_hwirq));
+                qemu_irq_pulse(spapr_qirq(spapr, s->afu_hwirq[0]));
 
                 stb_phys(&address_space_memory, wed + 1, 0x1); /* write status */
                 mcmd->status = 0x3; /* Process Element has been terminated/Removed */
@@ -325,6 +346,7 @@ static void *memcopy_status_t(void *arg)
         }
     }
 out:
+    g_free(data);
     return ((void *)rc);
 }
 
@@ -334,8 +356,7 @@ static uint64_t capi_mmio_read(void *opaque, hwaddr addr, unsigned size)
     struct memcopy_cmd *mcmd;
     int pasid;
 
-    fprintf(stderr, "%s - addr: 0x%lx,  size: 0x%x\n",
-            __func__, addr, size);
+    pr_debug("%s - addr: 0x%lx,  size: 0x%x\n", __func__, addr, size);
 
     if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
         (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
@@ -358,17 +379,17 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                             unsigned width)
 {
     sPAPRCAPIDeviceState *s = opaque;
-    struct data_t data;
+    struct data_t *data;
     pthread_t thr;
     int pasid;
 
-    fprintf(stderr, "%s - addr: 0x%lx, val: 0x%lx\n",
-            __func__, addr, val);
+    pr_debug("%s - addr: 0x%lx, val: 0x%lx\n", __func__, addr, val);
 
     if ((addr >= OCXL_AFU_PER_PPROCESS_PSA_ADDR_START) &&
         (addr <= OCXL_AFU_PER_PPROCESS_PSA_ADDR_END))
     {
         pasid = get_pasid(addr);
+        data = g_malloc(sizeof (struct data_t));
 
         /* WED Register (x0000)
          *     [63:12] Base EA of the start of the work element queue.
@@ -383,9 +404,9 @@ static void capi_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                                           * to AFU and not Terminated/Removed */
 
             /* start a thread to update the memcopy status */
-            data.s = s;
-            data.pasid = pasid;
-            pthread_create(&thr, NULL, memcopy_status_t, &data);
+            data->s = s;
+            data->pasid = pasid;
+            pthread_create(&thr, NULL, memcopy_status_t, data);
         break;
         case 0x28:
         case 0x2C:
@@ -422,9 +443,6 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
     pci_register_bar(pdev, 0,
             PCI_BASE_ADDRESS_SPACE_MEMORY | PCI_BASE_ADDRESS_MEM_TYPE_64,
             &s->mmio);
-
-    /* Capabilities ? */
-    /*pcie_endpoint_cap_init(pdev, 0x40);*/
 
     /* Extended Capabilities in Configuration Space
      * always begin at offset 100h
@@ -479,6 +497,8 @@ static void spapr_capi_device_realize(PCIDevice *pdev, Error **errp)
 
 static void spapr_capi_device_exit(PCIDevice *pdev)
 {
+    if (afu_info_id)
+        g_free(afu_info_id);
 }
 
 static uint32_t spapr_capi_read_config(PCIDevice *pdev, uint32_t addr, int l)
@@ -492,118 +512,39 @@ static uint32_t spapr_capi_read_config(PCIDevice *pdev, uint32_t addr, int l)
         int32_t offset =
             pci_default_read_config(pdev, dvsec_afu_info_off, 4) & 0x7ffffff;
 
-        if (offset >= OCXL_DVSEC_TEMPL_WWID) {
-            fprintf(stderr, "%s: OCXL_DVSEC_AFU_INFO_DATA 0x%x\n", __func__,
-                    offset);
+        if (offset >= OCXL_DVSEC_TEMPL_WWID)
             return 0;
-        } else if (offset >= OCXL_DVSEC_TEMPL_MEM_SZ) {
-            uint8_t templ_mem_sz = 0x1a;
 
-            val =
-                templ_mem_sz & 0xff;
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MEM_SZ 0x%x\n", __func__,
-                    val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_PP_SZ) {
-            uint32_t templ_mmio_pp_stride = 0x1;
-
-            val =
-                templ_mmio_pp_stride << 16;
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_PP_SZ 0x%x\n",
-                    __func__, val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_PP) {
-            uint8_t templ_mmio_pp = 0x0;
-            uint16_t templ_mmio_pp_offset_lo = 0x200;
-            uint32_t templ_mmio_pp_offset_hi = 0x0;
-
-            if (offset == OCXL_DVSEC_TEMPL_MMIO_PP) {
-                val =
-                    templ_mmio_pp +
-                    (templ_mmio_pp_offset_lo << 16);
-            } else {
-                val = templ_mmio_pp_offset_hi;
-            }
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_PP 0x%x\n", __func__,
-                    val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_GLOBAL_SZ) {
-            uint32_t templ_mmio_global_size = 0x2000000;
-
-            val = templ_mmio_global_size;
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_GLOBAL_SZ 0x%x\n",
-                    __func__, val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
-            uint8_t templ_mmio_global = 0x0;
-            uint16_t templ_mmio_global_offset_lo = 0x0;
-            uint32_t templ_mmio_global_offset_hi = 0x0;
-
-            if (offset == OCXL_DVSEC_TEMPL_MMIO_GLOBAL) {
-                val =
-                    templ_mmio_global +
-                    (templ_mmio_global_offset_lo << 16);
-            } else {
-                val = templ_mmio_global_offset_hi;
-            }
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_MMIO_GLOBAL 0x%x\n", __func__,
-                    val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_AFU_VERSION) {
-            uint8_t templ_afu_major_version = 0x1;
-            uint8_t templ_afu_minor_version = 0x0;
-
-            val =
-                (templ_afu_minor_version << 16) +
-                (templ_afu_major_version << 24);
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_VERSION 0x%x\n", __func__,
-                    val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_NAME) {
-            const char *templ_name = "IBM,MEMCPY3";
-            int i;
-
-            offset -= OCXL_DVSEC_TEMPL_NAME;
-            val = 0;
-
-            for (i = offset; i < offset + l; i++) {
-                int j = 2 * offset + l - i - 1;
-
-                val <<= 8;
-                if (j < strlen(templ_name)) {
-                    val |= templ_name[j];
-                }
-            }
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_NAME[%d] 0x%x\n", __func__,
-                    offset, val);
-#endif
-        } else if (offset >= OCXL_DVSEC_TEMPL_VERSION) {
-            uint8_t templ_major_version = 0x0;
-            uint8_t templ_minor_version = 0x5;
-            uint16_t templ_size = 0x58;
-
-            val =
-                templ_minor_version +
-                (templ_major_version << 8) +
-                (templ_size << 16);
-#if 0
-            fprintf(stderr, "%s: OCXL_DVSEC_TEMPL_VERSION 0x%x\n", __func__,
-                    val);
-#endif
+        if (!afu_info_id) {
+                afu_info_id = g_malloc(TEMPL_LEN);
+                *(uint32_t *)&afu_info_id[0x0] = 0x00580005;
+                *(uint32_t *)&afu_info_id[0x4] = 0x2c4d4249;
+                *(uint32_t *)&afu_info_id[0x8] = 0x434d454d;
+                *(uint32_t *)&afu_info_id[0xC] = 0x00335950;
+                *(uint32_t *)&afu_info_id[0x10] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x14] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x18] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x1C] = 0x01002401;
+                *(uint32_t *)&afu_info_id[0x20] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x24] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x28] = 0x02000000;
+                *(uint32_t *)&afu_info_id[0x2C] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x30] = 0x02000000;
+                *(uint32_t *)&afu_info_id[0x34] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x38] = 0x00010000;
+                *(uint32_t *)&afu_info_id[0x3C] = 0x0000001a;
+                *(uint32_t *)&afu_info_id[0x40] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x44] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x48] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x4C] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x50] = 0x00000000;
+                *(uint32_t *)&afu_info_id[0x54] = 0x00000000;
         }
-    } else {
+        val = (*(uint32_t *)(afu_info_id + offset));
+
+    } else
         val = pci_default_read_config(pdev, addr, l);
-#if 0
-        fprintf(stderr, "%s: 0x%x 0x%x (%d)\n", __func__, addr, val, l);
-#endif
-    }
+
     return val;
 }
 
@@ -615,9 +556,7 @@ static void spapr_capi_write_config(PCIDevice *pdev, uint32_t addr,
     if (addr == s->dvsec_afu_info_id + OCXL_DVSEC_AFU_INFO_OFF) {
         val |= 1<<31; /* Valid bit */
     }
-#if 0
-    fprintf(stderr, "%s: 0x%x 0x%x (%d)\n", __func__, addr, val, l);
-#endif
+
     pci_default_write_config(pdev, addr, val, l);
 }
 
